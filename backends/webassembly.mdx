@@ -1,7 +1,7 @@
 ---
 title: "WebAssembly Backend for Prowl.Quill Vector Graphics"
 sidebarTitle: "WebAssembly"
-description: "Run Prowl.Quill in the browser with .NET WASM and WebGL 2. Covers project setup, WebGLInterop, JSExport frame callbacks, and serialising draw calls across the JS boundary."
+description: "Run Prowl.Quill in the browser with .NET WASM and WebGL 2. Covers project setup, WebGLInterop, JSExport frame callbacks, and draw-call serialisation."
 ---
 
 The WebAssembly backend makes Prowl.Quill run entirely in the browser. The .NET WASM runtime executes the Quill geometry tessellation on the CPU side, then serialises the resulting vertex and draw-call data across the JavaScript boundary to a thin WebGL 2 renderer written in JS. Frame callbacks are exported via `[JSExport]` attributes and called from a `requestAnimationFrame` loop on the JavaScript side. Resources such as fonts, textures, and SVG files are embedded as assembly resources rather than loaded from the file system, since WASM has no traditional filesystem access.
@@ -13,7 +13,7 @@ The WASM example is a .NET WASM project (not Blazor — it is a bare `dotnet-sdk
 ```xml
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>

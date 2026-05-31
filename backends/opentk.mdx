@@ -1,7 +1,7 @@
 ---
-title: "OpenTK Backend for Prowl.Quill Vector Graphics"
+title: "OpenTK Backend for Prowl.Quill: OpenGL 3.3 Rendering"
 sidebarTitle: "OpenTK"
-description: "Integrate Prowl.Quill with OpenTK using OpenGL 3.3 Core. Covers NuGet setup, CanvasRenderer initialization, the per-frame loop, GLSL shaders, and backdrop blur."
+description: "Integrate Prowl.Quill with OpenTK using OpenGL 3.3 Core. Covers NuGet packages, CanvasRenderer initialization, the per-frame render loop, and GLSL shaders."
 ---
 
 The OpenTK backend is the reference implementation for Prowl.Quill and the most fully-featured of all the provided samples. It targets OpenGL 3.3 Core Profile through the `OpenTK` NuGet package, implements the full dual Kawase backdrop blur pipeline, and demonstrates every major `ICanvasRenderer` contract — texture creation, geometry upload via VAO/VBO/EBO, and per-draw-call uniform binding. If you are building a desktop application with .NET and want a battle-tested starting point, this is the backend to copy and adapt.

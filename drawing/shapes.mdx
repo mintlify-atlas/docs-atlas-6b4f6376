@@ -148,16 +148,30 @@ All coordinates passed to the canvas are in **logical units**. The canvas multip
 
     ### `RoundedRect`
 
-    Creates a closed rounded-rectangle path using arc segments at each corner.
+    Creates a closed rounded-rectangle path using arc segments at each corner. Two overloads are available: a uniform-radius form and a per-corner form.
 
     ```csharp
+    // Uniform radius on all four corners
     void RoundedRect(float x, float y, float width, float height, float radius)
+
+    // Independent radius per corner
+    void RoundedRect(float x, float y, float width, float height,
+                     float tlRadii, float trRadii, float brRadii, float blRadii)
     ```
+
+    Radii are automatically clamped to half the smaller dimension so corners never overlap.
 
     ```csharp
     canvas.SetFillColor(Color32.FromArgb(180, 100, 100, 255));
     canvas.RoundedRect(20, 20, 160, 90, 16);
     canvas.Fill();
+
+    // Only top corners rounded
+    canvas.SetFillColor(Color32.FromArgb(200, 60, 120, 220));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(1.5f);
+    canvas.RoundedRect(20, 20, 160, 90, tlRadii: 16, trRadii: 16, brRadii: 0, blRadii: 0);
+    canvas.FillAndStroke();
     ```
 
     ---

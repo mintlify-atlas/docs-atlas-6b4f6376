@@ -1,7 +1,7 @@
 ---
-title: "Raylib Backend for Prowl.Quill Vector Graphics"
+title: "Raylib Backend for Prowl.Quill: rlgl Vector Graphics"
 sidebarTitle: "Raylib"
-description: "Integrate Prowl.Quill with Raylib-cs using rlgl. Covers NuGet setup, RaylibCanvasRenderer, the per-frame loop, inline GLSL shaders, and backdrop blur."
+description: "Integrate Prowl.Quill with Raylib-cs using the rlgl layer. Covers NuGet setup, RaylibCanvasRenderer initialization, the frame loop, and backdrop blur."
 ---
 
 The Raylib backend lets you embed Prowl.Quill vector graphics inside any Raylib-cs application with very little boilerplate. It uses `rlgl` — Raylib's thin OpenGL abstraction layer — to submit geometry directly, so it slots naturally between `BeginDrawing()` and `EndDrawing()` without conflicting with Raylib's own render batch. The backend compiles its GLSL shaders from inline strings in `RaylibCanvasRenderer`, which means there are no external shader files to manage. Like the OpenTK and Silk.NET backends, it implements the full dual Kawase backdrop blur pipeline via Raylib `RenderTexture2D` objects, giving you `SupportsBackdropBlur = true` out of the box.

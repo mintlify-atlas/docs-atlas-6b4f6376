@@ -1,7 +1,7 @@
 ---
-title: "Unity Backend for Prowl.Quill Vector Graphics"
+title: "Unity Backend for Prowl.Quill: Mesh and CommandBuffer"
 sidebarTitle: "Unity"
-description: "Render Prowl.Quill vector graphics inside Unity using DrawMeshNow and CommandBuffer. Requires netstandard2.1 DLL builds of Quill, Scribe, and Vector in Assets/Plugins."
+description: "Render Prowl.Quill vector graphics inside Unity using Mesh and CommandBuffer. Requires netstandard2.1 DLL builds of Quill, Scribe, and Vector."
 ---
 
 The Unity backend lets you render anti-aliased 2D vector graphics from Prowl.Quill inside any Unity project. It uses Unity's `Mesh`, `Material`, and `CommandBuffer` APIs rather than calling OpenGL directly, making it compatible with Unity's rendering pipeline across both the Built-in Render Pipeline and (via `CommandBuffer`) URP and HDRP. The renderer is wrapped in a `MonoBehaviour` called `QuillCanvasBehaviour` which handles both screen-space overlay rendering (via camera command buffers) and world-space rendering (via a `RenderTexture` on a quad mesh). Backdrop blur is **not** supported in this backend — `SupportsBackdropBlur` returns `false` and Quill degrades those fills to flat tinted shapes.

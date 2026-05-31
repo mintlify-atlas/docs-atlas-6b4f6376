@@ -82,10 +82,14 @@ public void SetGlobalAlpha(float alpha)
 
 Applies a global opacity multiplier (0–1) to every vertex written after this call. This is multiplicative with any per-vertex alpha already in the color.
 
+<Warning>
+  `SetGlobalAlpha` is **not** part of the saved state stack. Calling `SaveState` and `RestoreState` will not undo a `SetGlobalAlpha` call — you must restore it manually.
+</Warning>
+
 ```csharp
 canvas.SetGlobalAlpha(0.5f); // all subsequent draws are 50% transparent
 canvas.RectFilled(0, 0, 200, 100, Color32.Blue);
-canvas.SetGlobalAlpha(1.0f); // restore full opacity
+canvas.SetGlobalAlpha(1.0f); // restore full opacity manually — SaveState/RestoreState won't do this
 ```
 
 ---

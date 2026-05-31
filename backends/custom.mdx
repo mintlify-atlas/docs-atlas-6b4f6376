@@ -1,7 +1,7 @@
 ---
 title: "Implementing a Custom Prowl.Quill Renderer Backend"
 sidebarTitle: "Custom Backend"
-description: "Full guide to implementing ICanvasRenderer for any graphics API. Covers all four methods, the DrawCall model, Brush and Scissor data, and a complete skeleton."
+description: "Full guide to implementing ICanvasRenderer for any graphics API. Covers all four methods, the DrawCall model, Brush and Scissor uniforms, and a skeleton."
 ---
 
 Prowl.Quill is completely decoupled from any specific graphics API. All rendering passes through a single interface — `ICanvasRenderer` — which you implement once for your target platform. You could write a backend for Vulkan, Metal, DirectX 11/12, a software rasteriser, or any other rendering system without changing a single line of Quill's core tessellation code. This guide walks you through the full interface, explains what each method and property must do, and provides an annotated skeleton you can use as a starting point.

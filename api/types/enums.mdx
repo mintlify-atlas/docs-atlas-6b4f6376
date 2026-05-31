@@ -4,7 +4,7 @@ sidebarTitle: "Enums"
 description: "Reference for all public Prowl.Quill enumerations: BrushType, WindingMode, JointStyle (Bevel/Miter/Round), and EndCapStyle (Butt/Round/Square/Bevel)."
 ---
 
-Prowl.Quill exposes four public enumerations that control how paths are filled and stroked. `BrushType` and `WindingMode` live in `Prowl.Quill`; `JointStyle` and `EndCapStyle` are defined in `Prowl.Vector` and used by the canvas stroke API. Understanding each value is essential for producing correct anti-aliased output from the canvas.
+Prowl.Quill exposes four public enumerations that control how paths are filled and stroked. All four — `BrushType`, `WindingMode`, `JointStyle`, and `EndCapStyle` — are defined in the `Prowl.Quill` namespace. Understanding each value is essential for producing correct anti-aliased output from the canvas.
 
 ---
 
@@ -124,7 +124,7 @@ both `Canvas.Fill` and `Canvas.FillComplex`.
 
 ## JointStyle
 
-`JointStyle` (from `Prowl.Vector`) controls how two consecutive stroke segments
+`JointStyle` (from `Prowl.Quill`) controls how two consecutive stroke segments
 connect at a shared corner. Set via `Canvas.SetStrokeJoint`.
 
 <ResponseField name="Bevel">
@@ -196,7 +196,7 @@ connect at a shared corner. Set via `Canvas.SetStrokeJoint`.
 
 ## EndCapStyle
 
-`EndCapStyle` (from `Prowl.Vector`) controls how the two open ends of a stroked
+`EndCapStyle` (from `Prowl.Quill`) controls how the two open ends of a stroked
 path are terminated. Set via `Canvas.SetStrokeCap` (both ends at once),
 `Canvas.SetStrokeStartCap`, or `Canvas.SetStrokeEndCap`.
 

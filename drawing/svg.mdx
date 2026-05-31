@@ -55,8 +55,8 @@ public class SvgElement
     public DrawCommand[]              drawCommands;// Path elements only
     public Color32                    stroke;      // Resolved stroke color
     public Color32                    fill;        // Resolved fill color
-    public ColorType                  strokeType;  // none | currentColor | specific
-    public ColorType                  fillType;    // none | currentColor | specific
+    public SvgElement.ColorType       strokeType;  // none | currentColor | specific
+    public SvgElement.ColorType       fillType;    // none | currentColor | specific
     public float                      strokeWidth; // Stroke width in SVG units
 }
 ```
@@ -86,7 +86,7 @@ SVGRenderer.currentColor = Color32.FromArgb(255, 80, 160, 255); // Blue theme
 When set to `true`, `DrawToCanvas` prints each processed draw command to `Console.WriteLine`. The flag is automatically reset to `false` after `DrawToCanvas` returns.
 
 ```csharp
-public static bool debug = false;
+public static bool debug;
 ```
 
 ### `DrawToCanvas`

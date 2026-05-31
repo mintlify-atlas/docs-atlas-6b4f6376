@@ -1,7 +1,7 @@
 ---
-title: "SFML Backend for Prowl.Quill Vector Graphics"
+title: "SFML Backend for Prowl.Quill: SFML.Net Vector Graphics"
 sidebarTitle: "SFML"
-description: "Integrate Prowl.Quill with SFML.Net. Covers NuGet setup, SFMLRenderer initialization, the per-frame loop, shader pipeline, and backdrop blur via RenderTexture."
+description: "Integrate Prowl.Quill with SFML.Net. Covers NuGet setup, SFMLRenderer initialization, the per-frame loop, the shader pipeline, and backdrop blur."
 ---
 
 The SFML backend brings Prowl.Quill into applications built with `SFML.Net`, the .NET binding for the popular Simple and Fast Multimedia Library. It uses SFML's own `Shader`, `VertexArray`, and `RenderWindow` APIs rather than accessing OpenGL directly, which makes it the most idiomatic choice for developers already familiar with the C++ SFML ecosystem. The backdrop blur feature is implemented using SFML `RenderTexture` objects as blur levels and a pair of dual Kawase fragment-only shaders. Because SFML's `Shader.IsAvailable` can return `false` on some platforms or driver configurations, the renderer checks shader availability before compiling and falls back to unshaded rendering gracefully.

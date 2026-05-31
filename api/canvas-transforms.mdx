@@ -1,5 +1,5 @@
 ---
-title: "Canvas Transform API — Prowl.Quill Reference"
+title: "Canvas Transform API — Prowl.Quill API Reference"
 sidebarTitle: "Transforms"
 description: "Full reference for the Canvas transform API: applying, setting, resetting 2D matrices and converting points between logical and pixel coordinate spaces."
 ---
@@ -77,7 +77,7 @@ canvas.CurrentTransform(saved); // manual restore without SaveState
 ### `TransformPoint`
 
 ```csharp
-public Float2 TransformPoint(Float2 unitPoint)
+public Float2 TransformPoint(in Float2 unitPoint)
 ```
 
 Applies the current transform to `unitPoint` (in logical units) and then multiplies by `FramebufferScale`, returning the result in **physical pixel coordinates**. This is the same computation the canvas performs internally for every path vertex. It is useful when you need a pixel-space position — for example, to pass to an external rendering system or to perform pixel-accurate hit testing.

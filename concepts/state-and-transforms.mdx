@@ -1,5 +1,5 @@
 ---
-title: "State and Transforms: Managing Canvas Context"
+title: "State and Transforms: Managing Prowl.Quill Context"
 sidebarTitle: "State & Transforms"
 description: "Master Prowl.Quill's state stack, 2D transform operations, and scissor clipping to isolate and reuse drawing context across your scene."
 ---
@@ -229,6 +229,10 @@ canvas.SetGlobalAlpha(0.5f); // scales all vertex alpha values by 0.5
 ```
 
 `SetGlobalAlpha` multiplies the alpha of every vertex added while it is active — a lightweight way to fade an entire group of shapes without modifying individual colours.
+
+<Note>
+  `SetGlobalAlpha` is stored in a **separate** `_globalAlpha` field, not inside `ProwlCanvasState`. This means `SaveState` and `RestoreState` do **not** save or restore the global alpha — you must reset it manually if you change it inside a save/restore pair.
+</Note>
 
 ## Complete Save/Restore Example
 

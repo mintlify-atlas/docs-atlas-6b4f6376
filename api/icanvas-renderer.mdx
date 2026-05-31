@@ -1,7 +1,7 @@
 ---
 title: "ICanvasRenderer — Prowl.Quill Renderer Backend Interface"
 sidebarTitle: "ICanvasRenderer"
-description: "Full reference for the ICanvasRenderer interface: texture lifecycle, draw-call submission, scissor handling, backdrop blur support, and a minimal skeleton implementation."
+description: "Full reference for ICanvasRenderer: texture lifecycle, draw-call submission, scissor handling, backdrop blur opt-in, and a skeleton backend implementation."
 ---
 
 `ICanvasRenderer` is the contract between Prowl.Quill's retained-mode canvas and a concrete graphics backend — OpenGL, DirectX, Vulkan, Metal, or any other API. Implement this interface once per target platform and pass the instance to the `Canvas` constructor. The canvas itself generates no GPU calls; it only accumulates geometry and state into `Vertex`, index, and `DrawCall` lists. Every frame, `Canvas.Render()` delegates to `ICanvasRenderer.RenderCalls`, handing the backend the full scene to submit.

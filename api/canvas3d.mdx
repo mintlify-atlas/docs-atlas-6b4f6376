@@ -298,7 +298,7 @@ public void Arc(Float3 center, float radius, Float3 normal, Float3 startDir,
                 float angleInRadians, int segments = 16)
 ```
 
-Appends a 3D arc to the **current open path**. The arc lies in the plane
+Starts a new path and populates it with a 3D arc. The arc lies in the plane
 defined by `normal`, starts along `startDir`, and sweeps through
 `angleInRadians`. Call `Stroke()` or `Fill()` after to render it.
 
@@ -317,7 +317,7 @@ defined by `normal`, starts along `startDir`, and sweeps through
 public void BezierCurve(Float3 p0, Float3 p1, Float3 p2, Float3 p3, int segments = 16)
 ```
 
-Appends a cubic Bézier curve in 3D space to the current path. Internally
+Starts a new path and populates it with a cubic Bézier curve in 3D space. Internally
 evaluates the curve at `segments` uniformly spaced parameter values and calls
 `LineTo` for each point. Call `Stroke()` after to render.
 
@@ -326,6 +326,34 @@ evaluates the curve at `segments` uniformly spaced parameter values and calls
 <ParamField path="p2" type="Float3">Second control point.</ParamField>
 <ParamField path="p3" type="Float3">End point (anchor).</ParamField>
 <ParamField path="segments" type="int">Number of line segments. Default `16`.</ParamField>
+
+---
+
+## Demo Method
+
+### Demo3D
+
+```csharp
+public void Demo3D()
+```
+
+Runs a built-in animated demo scene on the wrapped canvas. Sets up a 45°
+perspective camera looking from `(0, 0, −10)` toward the origin, then draws:
+
+- A **rotating wireframe cube** offset left at `(−3, 0, 0)`, stroked in red.
+- A **rotating wireframe sphere** offset right at `(3, 0, 0)`, stroked in blue.
+- A **full-circle arc** in the XZ plane at the origin, filled yellow and stroked
+  purple with a heavier stroke width.
+
+Rotation is driven by `Environment.TickCount`, so the scene animates when
+called repeatedly each frame.
+
+```csharp
+var canvas3D = new Canvas3D(canvas, windowWidth, windowHeight);
+canvas.BeginFrame(windowWidth, windowHeight, 1f);
+canvas3D.Demo3D();
+canvas.Render();
+```
 
 ---
 

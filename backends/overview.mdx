@@ -1,7 +1,7 @@
 ---
-title: "Prowl.Quill Rendering Backends Overview"
+title: "Prowl.Quill Rendering Backends: Choose Your Graphics API"
 sidebarTitle: "Backends Overview"
-description: "Choose a rendering backend for Prowl.Quill. Every backend implements ICanvasRenderer, giving you hardware-accelerated, anti-aliased 2D vector graphics."
+description: "Choose a rendering backend for Prowl.Quill. Every backend implements ICanvasRenderer, giving you hardware-accelerated 2D vector graphics on any platform."
 ---
 
 Prowl.Quill is designed to be renderer-agnostic. All rendering is funnelled through a single interface — `ICanvasRenderer` — which you implement once for your target graphics API. The library ships with six ready-made sample backends covering OpenTK, Raylib, SFML, Silk.NET, Unity, and WebAssembly. Whether you are building a desktop game, a browser app, or a Unity project, there is a backend you can drop in or adapt to your needs. Every backend follows the same three-step frame loop: call `canvas.BeginFrame(...)`, issue drawing commands, then call `canvas.Render()`.

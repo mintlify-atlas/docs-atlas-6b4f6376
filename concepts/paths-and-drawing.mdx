@@ -1,5 +1,5 @@
 ---
-title: "Paths and Drawing: Building Vector Shapes"
+title: "Paths and Drawing: Building Vector Shapes in Quill"
 sidebarTitle: "Paths & Drawing"
 description: "Understand Prowl.Quill's path model — subpaths, curve commands, winding rules, and when to choose Fill, FillComplex, or FillComplexAA."
 ---
@@ -214,7 +214,8 @@ canvas.ClosePath();
 canvas.SetFillColor(Color32.FromArgb(255, 100, 200, 255));
 canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
 canvas.SetStrokeWidth(1.5f);
-canvas.FillAndStroke();   // Fill() works here — shape is not self-intersecting
+canvas.FillComplex();  // Shape is concave — use FillComplex, not Fill
+canvas.Stroke();
 ```
 
 <Warning>

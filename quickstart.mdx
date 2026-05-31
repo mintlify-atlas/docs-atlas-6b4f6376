@@ -1,7 +1,7 @@
 ---
 title: "Quickstart: Draw Your First Shape with Prowl.Quill"
 sidebarTitle: "Quickstart"
-description: "Step-by-step guide to installing Prowl.Quill, wiring up an OpenTK backend, and rendering anti-aliased 2D shapes in a live window."
+description: "Step-by-step guide to installing Prowl.Quill, wiring up an OpenTK backend, and rendering anti-aliased 2D shapes in a live OpenGL window."
 ---
 
 This guide walks you from a blank project to a working canvas window that draws anti-aliased shapes using Prowl.Quill and the OpenTK backend. You will install the NuGet package, implement the rendering loop, and see real output on screen — all in a handful of steps. No prior experience with Quill is required, but familiarity with C# and basic .NET project creation is assumed.
@@ -76,6 +76,7 @@ Once you have a renderer instance, create a `Canvas` and call `BeginFrame` at th
 ```csharp
 using Prowl.Quill;
 using Prowl.Scribe;
+using Prowl.Vector;
 
 // Instantiate your ICanvasRenderer implementation.
 var renderer = new CanvasRenderer();
@@ -101,16 +102,16 @@ After `BeginFrame`, issue drawing commands using the Canvas API. When you are do
 // --- continued inside your render loop ---
 
 // ── Filled rectangle ───────────────────────────────────────────────────────
-canvas.RectFilled(10, 10, 100, 50, Color.FromArgb(200, 255, 100, 100));
+canvas.RectFilled(10, 10, 100, 50, Color32.FromArgb(200, 255, 100, 100));
 
 // ── Stroked circle ─────────────────────────────────────────────────────────
-canvas.SetStrokeColor(Color.FromArgb(255, 255, 255, 255));
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
 canvas.SetStrokeWidth(2.0f);
 canvas.Circle(200, 100, 40);
 canvas.Stroke();
 
 // ── Filled rounded rectangle ───────────────────────────────────────────────
-canvas.SetFillColor(Color.FromArgb(200, 100, 255, 150));
+canvas.SetFillColor(Color32.FromArgb(200, 100, 255, 150));
 canvas.RoundedRect(300, 100, 120, 60, 15, 15, 15, 15);
 canvas.Fill();
 
@@ -120,8 +121,8 @@ canvas.MoveTo(50, 200);
 canvas.LineTo(150, 200);
 canvas.LineTo(100, 300);
 canvas.ClosePath();
-canvas.SetFillColor(Color.FromArgb(180, 100, 100, 255));
-canvas.SetStrokeColor(Color.FromArgb(255, 255, 255, 255));
+canvas.SetFillColor(Color32.FromArgb(180, 100, 100, 255));
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
 canvas.SetStrokeWidth(3.0f);
 canvas.FillAndStroke();
 
@@ -129,7 +130,7 @@ canvas.FillAndStroke();
 canvas.BeginPath();
 canvas.MoveTo(50, 350);
 canvas.BezierCurveTo(100, 250, 200, 450, 250, 350);
-canvas.SetStrokeColor(Color.FromArgb(255, 100, 200, 255));
+canvas.SetStrokeColor(Color32.FromArgb(255, 100, 200, 255));
 canvas.Stroke();
 
 // Flush geometry to the GPU.
@@ -186,6 +187,7 @@ using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
 using Prowl.Quill;
 using Prowl.Scribe;
+using Prowl.Vector;
 
 namespace OpenTKExample
 {
@@ -219,14 +221,14 @@ namespace OpenTKExample
             _canvas.BeginFrame(ClientSize.X, ClientSize.Y, dpiScale);
 
             // 2. Issue drawing commands.
-            _canvas.RectFilled(10, 10, 200, 100, Color.FromArgb(200, 255, 100, 100));
+            _canvas.RectFilled(10, 10, 200, 100, Color32.FromArgb(200, 255, 100, 100));
 
-            _canvas.SetStrokeColor(Color.FromArgb(255, 255, 255, 255));
+            _canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
             _canvas.SetStrokeWidth(3.0f);
             _canvas.Circle(400, 200, 80);
             _canvas.Stroke();
 
-            _canvas.SetFillColor(Color.FromArgb(180, 100, 200, 255));
+            _canvas.SetFillColor(Color32.FromArgb(180, 100, 200, 255));
             _canvas.RoundedRect(600, 50, 160, 80, 20, 20, 20, 20);
             _canvas.Fill();
 
