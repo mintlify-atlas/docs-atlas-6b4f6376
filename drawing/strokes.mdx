@@ -1,0 +1,341 @@
+---
+title: "Stroke Styles, Caps, Joins and Dash Patterns in Quill"
+sidebarTitle: "Strokes"
+description: "Configure stroke color, width, scale, cap styles, joint styles, miter limits, dash patterns, and global alpha for all path-based drawing operations."
+---
+
+Every stroked path in Prowl.Quill reads from a mutable state object that you configure before calling `Stroke()` or `FillAndStroke()`. State is inherited until you explicitly change it, so you only need to set what is different from the previous shape. Use `SaveState()` / `RestoreState()` to scope style changes to a block of draw calls without having to manually restore each field.
+
+## Color and Width
+
+### `SetStrokeColor`
+
+Sets the color applied to all stroked paths until changed.
+
+```csharp
+void SetStrokeColor(Color32 color)
+```
+
+```csharp
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255)); // Opaque white
+canvas.SetStrokeColor(Color32.FromArgb(128, 255, 80, 80));   // Semi-transparent red
+```
+
+---
+
+### `SetStrokeWidth`
+
+Sets the stroke width in **logical units**. The default is `2`. Values below `1` produce hair-thin lines; values above `20` produce thick bands.
+
+```csharp
+void SetStrokeWidth(float width = 2f)
+```
+
+---
+
+### `SetStrokeScale`
+
+Multiplies the effective stroke width and dash lengths by a scale factor. This is useful when the canvas transform includes a zoom level — setting the stroke scale to the inverse zoom keeps lines visually constant-width.
+
+```csharp
+void SetStrokeScale(float scale)
+```
+
+```csharp
+float zoom = 2.0f;
+canvas.TransformBy(Transform2D.CreateScale(zoom, zoom));
+canvas.SetStrokeScale(zoom); // Compensate so strokes stay 1 logical unit wide
+```
+
+---
+
+## Joint Styles
+
+### `SetStrokeJoint`
+
+Controls how corners are drawn where two line segments meet. The `JointStyle` enum has three values:
+
+```csharp
+void SetStrokeJoint(JointStyle joint)
+```
+
+<Tabs>
+  <Tab title="Bevel">
+
+    The two segment ends are capped with a flat edge and connected by a filled triangle. This is the **default** — it is the cheapest to tessellate and avoids the spike problem of miter joins at sharp angles.
+
+    ```csharp
+    canvas.SetStrokeJoint(JointStyle.Bevel);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 100, 100));
+    canvas.SetStrokeWidth(8f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(20, 80);
+    canvas.LineTo(80, 20);
+    canvas.LineTo(140, 80);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+  <Tab title="Miter">
+
+    The outer edges of the two segments are extended until they meet at a sharp point. Can produce very long spikes at acute angles. Use `SetMiterLimit` to control the fallback behaviour.
+
+    ```csharp
+    canvas.SetStrokeJoint(JointStyle.Miter);
+    canvas.SetMiterLimit(4f); // Fall back to bevel when spike would exceed 4× width
+    canvas.SetStrokeColor(Color32.FromArgb(255, 100, 100, 255));
+    canvas.SetStrokeWidth(8f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(20, 80);
+    canvas.LineTo(80, 20);
+    canvas.LineTo(140, 80);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+  <Tab title="Round">
+
+    A circular arc is added at the joint, centred on the meeting point. Produces the smoothest appearance but uses the most geometry. Ideal for organic or hand-drawn aesthetics.
+
+    ```csharp
+    canvas.SetStrokeJoint(JointStyle.Round);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 100, 255, 100));
+    canvas.SetStrokeWidth(8f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(20, 80);
+    canvas.LineTo(80, 20);
+    canvas.LineTo(140, 80);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+</Tabs>
+
+---
+
+## Cap Styles
+
+Caps are applied to the **open ends** of a path (i.e., paths where the first and last points do not meet). You can set both caps at once with `SetStrokeCap`, or set start and end independently.
+
+```csharp
+void SetStrokeCap(EndCapStyle cap)         // Sets both start and end caps
+void SetStrokeStartCap(EndCapStyle cap)    // Start of the path only
+void SetStrokeEndCap(EndCapStyle cap)      // End of the path only
+```
+
+<Tabs>
+  <Tab title="Butt">
+
+    The stroke ends exactly at the first and last path points with no extension. This is the **default** and produces the tightest bounding box.
+
+    ```csharp
+    canvas.SetStrokeCap(EndCapStyle.Butt);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 100, 100));
+    canvas.SetStrokeWidth(16f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(30, 60);
+    canvas.LineTo(170, 60);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+  <Tab title="Square">
+
+    Extends the stroke by half the stroke width beyond both endpoints, producing a square cap. The path visually appears longer than with `Butt`.
+
+    ```csharp
+    canvas.SetStrokeCap(EndCapStyle.Square);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 180, 100));
+    canvas.SetStrokeWidth(16f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(30, 60);
+    canvas.LineTo(170, 60);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+  <Tab title="Round">
+
+    Adds a semicircular cap centred on the endpoint, extending half the stroke width beyond the path. Produces soft, pill-shaped line ends.
+
+    ```csharp
+    canvas.SetStrokeCap(EndCapStyle.Round);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 100, 255, 100));
+    canvas.SetStrokeWidth(16f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(30, 60);
+    canvas.LineTo(170, 60);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+  <Tab title="Bevel">
+
+    Closes the cap with a diagonal chamfer, giving a wedge appearance. Rarely used on straight paths but can create interesting arrow-head-like endings.
+
+    ```csharp
+    canvas.SetStrokeCap(EndCapStyle.Bevel);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 100, 180, 255));
+    canvas.SetStrokeWidth(16f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(30, 60);
+    canvas.LineTo(170, 60);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+</Tabs>
+
+### Mixed caps example
+
+```csharp
+// Arrow-like: flat start, round tip
+canvas.SetStrokeStartCap(EndCapStyle.Butt);
+canvas.SetStrokeEndCap(EndCapStyle.Round);
+canvas.SetStrokeWidth(12f);
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 150));
+
+canvas.BeginPath();
+canvas.MoveTo(20, 80);
+canvas.LineTo(200, 80);
+canvas.Stroke();
+```
+
+---
+
+## Miter Limit
+
+### `SetMiterLimit`
+
+When the joint style is `Miter`, this value caps how far the miter spike can extend before the joint automatically falls back to `Bevel`. The limit is expressed as a ratio of the miter length to the stroke width. The default is **4**.
+
+```csharp
+void SetMiterLimit(float limit = 4)
+```
+
+```csharp
+// Very sharp angles allowed — use with care
+canvas.SetStrokeJoint(JointStyle.Miter);
+canvas.SetMiterLimit(10f);
+
+// Conservative — falls back to bevel at moderate angles
+canvas.SetMiterLimit(2f);
+```
+
+---
+
+## Tessellation and Rounding
+
+### `SetTessellationTolerance`
+
+Controls the maximum allowed deviation (in logical units) when flattening Bézier curves and arcs into line segments. Lower values produce smoother curves with more triangles. Default is **0.5**.
+
+```csharp
+void SetTessellationTolerance(float tolerance = 0.5f)
+```
+
+### `SetRoundingMinDistance`
+
+Sets the minimum distance between consecutive arc sample points. This bounds the maximum segment count for very large arcs or circles. Default is **3** logical units.
+
+```csharp
+void SetRoundingMinDistance(float distance = 3f)
+```
+
+---
+
+## Dash Patterns
+
+### `SetStrokeDash`
+
+Activates a dash pattern on all subsequent strokes. The `pattern` list alternates between **dash length** and **gap length** in logical units (e.g., `[10, 5]` = 10-unit dash, 5-unit gap). If the list has an odd number of elements it is automatically doubled so the pattern can tile evenly. The optional `offset` shifts the phase along the path.
+
+```csharp
+void SetStrokeDash(List<float> pattern, float offset = 0.0f)
+```
+
+```csharp
+// Simple equal dashes and gaps
+canvas.SetStrokeDash(new List<float> { 10, 5 });
+
+// Long-short-long pattern
+canvas.SetStrokeDash(new List<float> { 20, 5, 5, 5 });
+
+// Animated marching ants (increment offset each frame)
+canvas.SetStrokeDash(new List<float> { 8, 4 }, offset: _time * 20f);
+```
+
+### `ClearStrokeDash`
+
+Reverts to a solid stroke.
+
+```csharp
+void ClearStrokeDash()
+```
+
+---
+
+## Global Alpha
+
+### `SetGlobalAlpha`
+
+Applies a uniform transparency multiplier to all subsequent vertices, including fills and strokes. Values range from `0` (fully transparent) to `1` (fully opaque, the default).
+
+```csharp
+void SetGlobalAlpha(float alpha)
+```
+
+```csharp
+// Fade out an entire group of shapes
+canvas.SetGlobalAlpha(0.4f);
+canvas.RectFilled(10, 10, 100, 60, Color32.FromArgb(255, 255, 100, 100));
+canvas.CircleFilled(80, 80, 30, Color32.FromArgb(255, 100, 200, 255));
+canvas.SetGlobalAlpha(1.0f); // Restore full opacity
+```
+
+<Note>
+  `SetGlobalAlpha` multiplies the vertex alpha at the point of insertion. This is different from a blend-mode layer — it does not compose the group first. For composited group transparency, use `SaveState()` / `RestoreState()` together with a semi-transparent fill.
+</Note>
+
+---
+
+## Putting It All Together
+
+```csharp
+// Heartbeat-style animated polyline with round joins and caps
+canvas.SaveState();
+
+canvas.SetStrokeColor(Color32.FromArgb(255, 80, 220, 120));
+canvas.SetStrokeWidth(5f);
+canvas.SetStrokeJoint(JointStyle.Round);
+canvas.SetStrokeCap(EndCapStyle.Round);
+canvas.SetMiterLimit(4f);
+
+canvas.BeginPath();
+canvas.MoveTo(10,  60);
+canvas.LineTo(40,  60);
+canvas.LineTo(60,  10);   // Spike up
+canvas.LineTo(80,  110);  // Spike down
+canvas.LineTo(100, 60);
+canvas.LineTo(190, 60);
+
+canvas.Stroke();
+
+// Dashed reference line
+canvas.SetStrokeColor(Color32.FromArgb(80, 255, 255, 255));
+canvas.SetStrokeWidth(1f);
+canvas.SetStrokeDash(new List<float> { 6, 4 });
+canvas.BeginPath();
+canvas.MoveTo(10, 60);
+canvas.LineTo(190, 60);
+canvas.Stroke();
+
+canvas.RestoreState();
+```

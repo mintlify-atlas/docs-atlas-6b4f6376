@@ -1,0 +1,157 @@
+---
+title: "Installing Prowl.Quill in Your .NET Project"
+sidebarTitle: "Installation"
+description: "Add Prowl.Quill to any .NET 6–10 or .NET Standard 2.1 project via NuGet, understand its single dependency, and configure a backend package."
+---
+
+Prowl.Quill is distributed as a NuGet package and integrates with any .NET project that targets a supported framework. The library has a single direct dependency — **Prowl.Scribe** — which is pulled in automatically by the package manager. Backend packages (OpenTK, Raylib, SFML, Silk.NET) are added separately and only when you need them, keeping your project graph lean.
+
+## Add Prowl.Quill
+
+Choose the method that matches your workflow. Both install the same package and produce identical results.
+
+<CodeGroup>
+
+```bash dotnet CLI
+dotnet add package Prowl.Quill
+```
+
+```xml PackageReference
+<PackageReference Include="Prowl.Quill" Version="1.4.0" />
+```
+
+</CodeGroup>
+
+After installation, restore packages in the usual way:
+
+```bash
+dotnet restore
+```
+
+## Supported Target Frameworks
+
+Prowl.Quill's `Quill.csproj` declares the following `<TargetFrameworks>`:
+
+| Framework | Notes |
+|-----------|-------|
+| `net6.0` | Minimum supported .NET version |
+| `net7.0` | |
+| `net8.0` | Current LTS release |
+| `net9.0` | |
+| `net10.0` | Latest / preview |
+| `netstandard2.1` | Unity, Xamarin, and other netstandard-compatible runtimes |
+
+<Note>
+  `.NET Standard 2.1` support means you can reference Prowl.Quill from Unity 2021.2+ projects (which implement netstandard2.1) without any special shims. You will still need to supply your own `ICanvasRenderer` backend that uses Unity's graphics API.
+</Note>
+
+## Dependency: Prowl.Scribe
+
+Prowl.Quill has exactly one direct NuGet dependency:
+
+```xml
+<PackageReference Include="Prowl.Scribe" Version="0.9.1" />
+```
+
+Prowl.Scribe provides TrueType font loading, glyph rasterization, atlas packing, and text/rich-text layout. It is bundled automatically — **you do not need to add it manually**. If you want to use Scribe's API directly (e.g., to create `FontFile` or `TextLayoutSettings` objects), it is available in the `Prowl.Scribe` namespace after installing Prowl.Quill.
+
+## Backend-Specific Packages
+
+Quill's rendering core is backend-agnostic. The sample backends in the repository each depend on their own graphics framework package. Add whichever one matches your target platform:
+
+<Tabs>
+  <Tab title="OpenTK">
+    The OpenTK backend targets OpenGL 3.3 Core and is the most fully featured sample (including dual-Kawase backdrop blur).
+
+    ```bash
+    dotnet add package OpenTK --version 4.9.4
+    ```
+
+    ```xml
+    <PackageReference Include="OpenTK" Version="4.9.4" />
+    ```
+
+    Copy `CanvasRenderer.cs` and the shared `Common` shader sources from `Samples/OpenTKExample/` into your project. The `CanvasRenderer` class implements `ICanvasRenderer` and is self-contained.
+  </Tab>
+  <Tab title="Raylib">
+    ```bash
+    dotnet add package Raylib-cs
+    ```
+
+    Copy `CanvasRenderer.cs` from `Samples/RaylibExample/` into your project.
+  </Tab>
+  <Tab title="SFML">
+    ```bash
+    dotnet add package SFML.Net
+    ```
+
+    Copy `CanvasRenderer.cs` from `Samples/SFMLExample/` into your project.
+  </Tab>
+  <Tab title="Silk.NET OpenGL">
+    ```bash
+    dotnet add package Silk.NET.OpenGL
+    ```
+
+    Copy `CanvasRenderer.cs` from `Samples/SilkNETExample/` into your project.
+  </Tab>
+</Tabs>
+
+<Tip>
+  All backend sample files are in the [Prowl.Quill GitHub repository](https://github.com/ProwlEngine/Prowl.Quill) under `Samples/`. Each backend directory is a standalone runnable project you can reference directly while developing.
+</Tip>
+
+## Verify Your Installation
+
+Create a minimal console project and confirm the namespace resolves correctly:
+
+```csharp
+using Prowl.Quill;
+
+// Canvas requires an ICanvasRenderer — this line confirms the package resolved.
+Console.WriteLine($"Prowl.Quill ready. Canvas type: {typeof(Canvas).FullName}");
+```
+
+```bash
+dotnet run
+# Prowl.Quill ready. Canvas type: Prowl.Quill.Canvas
+```
+
+## Project File Reference
+
+A complete `.csproj` for an OpenTK-backed Quill application looks like this:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Core library (brings in Prowl.Scribe automatically) -->
+    <PackageReference Include="Prowl.Quill" Version="1.4.0" />
+
+    <!-- OpenTK backend dependency -->
+    <PackageReference Include="OpenTK" Version="4.9.4" />
+  </ItemGroup>
+
+</Project>
+```
+
+<Warning>
+  Prowl.Quill requires `<Nullable>enable</Nullable>` in your project file when targeting net6.0 or later because the library's public API surface uses C# nullable reference type annotations. Projects that have nullable analysis disabled may see build warnings on some overloads.
+</Warning>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Follow the step-by-step guide to draw your first shapes with the OpenTK backend.
+  </Card>
+  <Card title="Backends Overview" icon="plug" href="/backends/overview">
+    Learn how to implement a custom `ICanvasRenderer` for your own graphics API.
+  </Card>
+</CardGroup>

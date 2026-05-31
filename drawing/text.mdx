@@ -1,0 +1,272 @@
+---
+title: "Text Rendering via Prowl.Quill and Prowl.Scribe Fonts"
+sidebarTitle: "Text"
+description: "Draw and measure text using FontFile, TextLayoutSettings, and TextLayout. Covers HiDPI scaling, origin-based alignment, layout caching, and fallback fonts."
+---
+
+Text in Prowl.Quill is rendered through **Prowl.Scribe** — a separate font-atlas system that rasterizes SDF glyphs into a GPU texture and submits quads directly into the canvas vertex buffer. The canvas acts as a bridge: it scales all logical-unit coordinates to physical pixels before handing off to Scribe, so your text is always crisp on Retina and HiDPI displays without any extra work on your part.
+
+<Note>
+  Prowl.Quill uses **Prowl.Scribe** for font atlas management. All glyph rendering goes through a GPU texture atlas that grows automatically up to `FontAtlasSettings.MaxAtlasSize` (default 4096 px). Font atlas textures are backend-specific objects managed internally — you never need to interact with them directly.
+</Note>
+
+## HiDPI and Logical Units
+
+All text API parameters (`pixelSize`, `x`, `y`, `letterSpacing`, `MaxWidth`) are in **logical units**. Internally the canvas multiplies them by `FramebufferScale` before rasterizing glyphs, so a font size of `24` always looks the same physical size regardless of display density.
+
+```csharp
+// Both lines produce identically sized text on screen;
+// the difference is only in framebuffer resolution.
+canvas.BeginFrame(800, 600, framebufferScale: 1.0f); // Standard
+canvas.BeginFrame(800, 600, framebufferScale: 2.0f); // Retina — same logical coords
+```
+
+---
+
+## Drawing Text
+
+### Simple Overload
+
+```csharp
+void DrawText(
+    string text,
+    float x, float y,
+    Color32 color,
+    float pixelSize,
+    FontFile font,
+    float letterSpacing = 0f,
+    Float2? origin = null)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `text` | The string to draw |
+| `x`, `y` | Position in logical units |
+| `color` | Text color |
+| `pixelSize` | Font size in logical units |
+| `font` | A loaded `FontFile` object |
+| `letterSpacing` | Extra space between characters in logical units (default `0`) |
+| `origin` | Alignment anchor (see below) |
+
+```csharp
+// Basic centered heading
+canvas.DrawText(
+    "Hello, Quill!",
+    x: canvas.Width / 2, y: 40,
+    color: Color32.FromArgb(255, 255, 255, 255),
+    pixelSize: 32,
+    font: myFont,
+    origin: new Float2(0.5f, 0.5f)); // Horizontally and vertically centred
+```
+
+---
+
+### Layout Settings Overload
+
+For multi-line, wrapped, or aligned text, pass a `TextLayoutSettings` struct instead of individual parameters.
+
+```csharp
+void DrawText(
+    string text,
+    float x, float y,
+    Color32 color,
+    TextLayoutSettings settings,
+    Float2? origin = null)
+```
+
+```csharp
+var settings = new TextLayoutSettings
+{
+    Font = myFont,
+    PixelSize = 18,
+    MaxWidth = 300,        // Wrap at 300 logical units
+    LetterSpacing = 0.5f,
+};
+
+canvas.DrawText(
+    "This is a long paragraph that will wrap at 300 logical units...",
+    x: 20, y: 80,
+    color: Color32.FromArgb(255, 220, 220, 220),
+    settings: settings);
+```
+
+---
+
+## The `origin` Parameter
+
+`origin` is a `Float2` where each component ranges from `0` to `1`. It defines the **anchor point** of the text relative to its measured bounding box:
+
+| Value | Meaning |
+|-------|---------|
+| `new Float2(0, 0)` | Top-left (default when `origin` is null) |
+| `new Float2(0.5f, 0)` | Horizontally centred, top-aligned |
+| `new Float2(0.5f, 0.5f)` | Fully centred (both axes) |
+| `new Float2(1f, 1f)` | Bottom-right aligned |
+
+```csharp
+// Draw a label centred on a button rectangle
+float btnX = 50, btnY = 60, btnW = 160, btnH = 40;
+canvas.DrawText(
+    "Click Me",
+    x: btnX + btnW / 2f, y: btnY + btnH / 2f,
+    color: Color32.FromArgb(255, 255, 255, 255),
+    pixelSize: 16,
+    font: myFont,
+    origin: new Float2(0.5f, 0.5f));
+
+// Right-align a score counter to the right edge of the screen
+canvas.DrawText(
+    $"Score: {score}",
+    x: canvas.Width - 10, y: 10,
+    color: Color32.FromArgb(255, 255, 220, 80),
+    pixelSize: 20,
+    font: myFont,
+    origin: new Float2(1f, 0f)); // Right-aligned, top
+```
+
+---
+
+## Measuring Text
+
+Both overloads return the measured bounding box in **logical units**, mirroring the logical-unit inputs.
+
+### Simple Measure
+
+```csharp
+Float2 MeasureText(string text, float pixelSize, FontFile font, float letterSpacing = 0f)
+```
+
+```csharp
+Float2 size = canvas.MeasureText("Hello", pixelSize: 24, font: myFont);
+float textWidth  = size.X;  // Logical units
+float textHeight = size.Y;  // Logical units
+```
+
+### Layout Settings Measure
+
+```csharp
+Float2 MeasureText(string text, TextLayoutSettings settings)
+```
+
+```csharp
+var settings = new TextLayoutSettings { Font = myFont, PixelSize = 18, MaxWidth = 300 };
+Float2 size = canvas.MeasureText("Some text", settings);
+```
+
+---
+
+## Pre-Built Layouts
+
+When the same text block is rendered every frame, you can pre-layout it once and reuse the result. `CreateLayout` does the glyph shaping and line-breaking work upfront; `DrawLayout` submits vertices each frame with no re-layout cost.
+
+### `CreateLayout`
+
+```csharp
+TextLayout CreateLayout(string text, TextLayoutSettings settings)
+```
+
+The returned `TextLayout` is in **pixel space** internally. Convert cursor positions back to logical units with `canvas.PixelToLogical()` if needed.
+
+### `DrawLayout`
+
+```csharp
+void DrawLayout(TextLayout layout, float x, float y, Color32 color, Float2? origin = null)
+```
+
+```csharp
+// Create once (e.g. when content changes)
+TextLayout layout = canvas.CreateLayout(
+    "Reusable paragraph text.",
+    new TextLayoutSettings { Font = myFont, PixelSize = 16, MaxWidth = 400 });
+
+// Draw every frame
+canvas.DrawLayout(layout, x: 20, y: 100, color: Color32.FromArgb(255, 220, 220, 220));
+```
+
+<Tip>
+  Font atlas layout caching is enabled by default (`FontAtlasSettings.UseLayoutCache = true`). The cache holds up to `MaxLayoutCacheSize` (default 256) entries and is keyed on the text string and settings. This means `DrawText` hot paths are nearly as fast as `DrawLayout` for text that doesn't change.
+</Tip>
+
+---
+
+## Fallback Fonts and System Fonts
+
+When a glyph is missing from the primary font, Quill automatically consults registered fallback fonts in registration order.
+
+### `AddFallbackFont`
+
+```csharp
+void AddFallbackFont(FontFile font)
+```
+
+```csharp
+FontFile emoji = FontFile.FromFile("NotoColorEmoji.ttf");
+canvas.AddFallbackFont(emoji);
+
+// Mixed Latin + emoji — emoji glyphs are served from the fallback
+canvas.DrawText("Hello 🌍", x: 20, y: 40, color: Color32.White, pixelSize: 24, font: myFont);
+```
+
+### `EnumerateSystemFonts`
+
+Returns all fonts installed on the host operating system as an `IEnumerable<FontFile>`. Useful for font pickers or loading platform-native fonts by name.
+
+```csharp
+IEnumerable<FontFile> EnumerateSystemFonts()
+```
+
+```csharp
+foreach (FontFile sysFont in canvas.EnumerateSystemFonts())
+{
+    Console.WriteLine(sysFont.FamilyName);
+}
+```
+
+---
+
+## Complete Example
+
+```csharp
+// --- Setup (once) ---
+var atlas = new FontAtlasSettings { AtlasSize = 1024, MaxAtlasSize = 4096 };
+FontFile heading = FontFile.FromFile("Roboto-Bold.ttf");
+FontFile body    = FontFile.FromFile("Roboto-Regular.ttf");
+FontFile emoji   = FontFile.FromFile("NotoEmoji.ttf");
+
+canvas.AddFallbackFont(emoji);
+
+// Pre-layout a long paragraph
+TextLayout para = canvas.CreateLayout(
+    "Prowl.Quill renders crisp, hardware-accelerated text at any DPI using " +
+    "the Prowl.Scribe glyph atlas. All sizes are in logical units — no manual " +
+    "HiDPI juggling required.",
+    new TextLayoutSettings { Font = body, PixelSize = 16, MaxWidth = 560 });
+
+// --- Per frame ---
+canvas.BeginFrame(windowWidth, windowHeight, framebufferScale);
+
+// Centred heading
+canvas.DrawText(
+    "Welcome to Prowl.Quill",
+    x: canvas.Width / 2f, y: 50,
+    color: Color32.FromArgb(255, 255, 255, 255),
+    pixelSize: 36,
+    font: heading,
+    origin: new Float2(0.5f, 0.5f));
+
+// Body paragraph
+canvas.DrawLayout(para, x: 20, y: 100,
+    color: Color32.FromArgb(255, 200, 200, 200));
+
+// Right-aligned subtitle with letter spacing
+canvas.DrawText(
+    "Powered by Prowl.Scribe 🚀",
+    x: canvas.Width - 20, y: canvas.Height - 30,
+    color: Color32.FromArgb(180, 160, 200, 255),
+    pixelSize: 14,
+    font: body,
+    letterSpacing: 0.8f,
+    origin: new Float2(1f, 1f));
+
+canvas.Render();
+```

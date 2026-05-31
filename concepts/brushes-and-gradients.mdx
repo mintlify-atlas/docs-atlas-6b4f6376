@@ -1,0 +1,261 @@
+---
+title: "Brushes and Gradients: Painting Beyond Solid Colour"
+sidebarTitle: "Brushes & Gradients"
+description: "Explore Prowl.Quill's brush system — linear, radial, and box gradients, texture mapping, backdrop blur, and custom shaders for rich fill effects."
+---
+
+When a solid colour is not enough, Prowl.Quill's **brush** system steps in. A brush extends any filled shape with gradients that blend between two colours, texture sampling, backdrop blur (frosted glass), and fully custom shader uniforms — all controlled through the canvas state, meaning they participate in draw-call batching automatically. Brushes are orthogonal to the path model: the same gradient that paints a rectangle also paints an arc or a complex tessellated polygon without any extra work.
+
+## The Brush Type Enum
+
+```csharp
+public enum BrushType
+{
+    None   = 0,   // solid colour from vertex data
+    Linear = 1,   // gradient along a line
+    Radial = 2,   // gradient in a circular pattern
+    Box    = 3    // gradient with rounded box falloff
+}
+```
+
+When `BrushType` is `None` (the default), shapes are painted with whatever colour was set via `SetFillColor` or passed directly to the vertex. Setting any gradient switches the active brush type for all subsequent fills until `ClearBrush` is called.
+
+## Gradient Brushes
+
+<Tabs>
+  <Tab title="Linear">
+    ```csharp
+    public void SetLinearBrush(
+        float x1, float y1,    // gradient start point
+        float x2, float y2,    // gradient end point
+        Color32 color1,         // colour at start
+        Color32 color2)         // colour at end
+    ```
+
+    A linear gradient transitions smoothly from `color1` at `(x1, y1)` to `color2` at `(x2, y2)`. Points outside the line's perpendicular extent are clamped to the nearest endpoint colour. The gradient is defined in the **current transform space** — if you have applied a translation or rotation via `TransformBy`, the gradient moves with it.
+
+    ```csharp
+    // Horizontal blue-to-transparent gradient over a rectangle
+    canvas.SetLinearBrush(
+        0, 0, 200, 0,                              // left to right
+        Color32.FromArgb(255, 80, 160, 240),        // opaque blue at left
+        Color32.FromArgb(0,   80, 160, 240));       // transparent blue at right
+    canvas.RectFilled(0, 0, 200, 80, Color32.FromArgb(255, 255, 255, 255));
+    canvas.ClearBrush();
+
+    // Diagonal gradient on a circle
+    canvas.SetLinearBrush(
+        60, 0, 120, 60,
+        Color32.FromArgb(255, 255, 100, 100),
+        Color32.FromArgb(255, 100, 100, 255));
+    canvas.CircleFilled(90, 30, 30, Color32.FromArgb(255, 255, 255, 255));
+    canvas.ClearBrush();
+
+    // Animated diagonal — colour2 alpha pulses with time
+    float alpha = (int)(255 * (0.5f + 0.5f * MathF.Sin(time * 2f)));
+    canvas.SetLinearBrush(
+        0, 40,  200, 120,
+        Color32.FromArgb(255, 255, 100, 255),
+        Color32.FromArgb((int)alpha, 100, 255, 255));
+    canvas.RectFilled(0, 40, 200, 80, Color32.FromArgb(255, 255, 255, 255));
+    canvas.ClearBrush();
+    ```
+  </Tab>
+  <Tab title="Radial">
+    ```csharp
+    public void SetRadialBrush(
+        float centerX, float centerY,   // gradient centre
+        float innerRadius,              // radius where inner colour ends
+        float outerRadius,             // radius where outer colour begins
+        Color32 innerColor,             // colour at centre
+        Color32 outerColor)             // colour at outer edge
+    ```
+
+    A radial gradient radiates outward from a centre point. Between `innerRadius` and `outerRadius` the two colours blend. Inside `innerRadius` the fill is solid `innerColor`; outside `outerRadius` it is solid `outerColor`. Setting `innerRadius` to `0` creates a classic spotlight effect.
+
+    ```csharp
+    // Glowing spotlight: bright centre fading to a dark edge
+    canvas.SetRadialBrush(
+        100, 100,                              // centre
+        0,                                     // inner radius (pure inner colour here)
+        80,                                    // outer radius
+        Color32.FromArgb(255, 240, 240, 100),  // bright yellow at centre
+        Color32.FromArgb(0,   80,  80,  20));  // transparent dark at edge
+    canvas.CircleFilled(100, 100, 80, Color32.FromArgb(255, 255, 255, 255));
+    canvas.ClearBrush();
+
+    // Animated radial: inner/outer radii driven by time
+    canvas.SetRadialBrush(
+        90, 90,
+        13f + MathF.Sin(time) * 5f,   // pulsing inner radius
+        30f,
+        Color32.FromArgb(255, 176, 224, 230),  // powder blue
+        Color32.FromArgb(255, 147,  112, 219)); // medium purple
+    canvas.CircleFilled(90, 90, 30, Color32.FromArgb(255, 255, 255, 255));
+    canvas.ClearBrush();
+    ```
+  </Tab>
+  <Tab title="Box">
+    ```csharp
+    public void SetBoxBrush(
+        float centerX, float centerY,  // box centre
+        float width, float height,     // box dimensions
+        float radi,                    // corner radius
+        float feather,                 // softness of the edge transition
+        Color32 innerColor,            // colour inside the box
+        Color32 outerColor)            // colour outside the box
+    ```
+
+    A box gradient (sometimes called a vignette) is like a radial gradient but shaped as a rounded rectangle rather than a circle. `radi` controls how rounded the inner box corners are; `feather` controls the width of the falloff band between `innerColor` and `outerColor`. Increasing `feather` creates a soft glow; setting it to `0` gives a hard edge.
+
+    ```csharp
+    // Sharp-edged panel highlight
+    canvas.SetBoxBrush(
+        100, 50,               // centre of the box
+        70, 70,                // box size (half-size stored internally)
+        5f,                    // corner radius
+        10f,                   // feather (soft edge)
+        Color32.FromArgb(255, 64, 224, 208),  // turquoise inside
+        Color32.FromArgb(255, 255, 99,  71)); // tomato outside
+    canvas.RectFilled(65, 15, 70, 70, Color32.FromArgb(255, 255, 255, 255));
+    canvas.ClearBrush();
+
+    // Rounded rect with matching box gradient
+    canvas.SetBoxBrush(
+        100, 90,
+        70, 70,
+        5f, 10f,
+        Color32.FromArgb(255, 255, 255, 100),  // yellow inside
+        Color32.FromArgb(255, 50, 128, 50));    // dark green outside
+    canvas.RoundedRectFilled(65, 55, 70, 70,
+        10, 10, 10, 10,
+        Color32.FromArgb(255, 240, 248, 255));  // alice blue vertex tint
+    canvas.ClearBrush();
+    ```
+  </Tab>
+</Tabs>
+
+## Clearing a Brush
+
+```csharp
+public void ClearBrush()
+```
+
+Resets the brush type to `BrushType.None`, reverting subsequent fills to the solid vertex colour. Always call `ClearBrush` after a gradient section if you do not want the gradient applied to the next shape.
+
+<Note>
+  Gradients snap to the transform that was active when `Set*Brush` was called. If you move the canvas after setting a gradient, the gradient stays anchored to the world coordinates you specified, not the new screen position. To move a gradient with a shape, set it after the transform.
+</Note>
+
+## Texture Brushes
+
+Textures layer on top of the brush type — they are independent of `BrushType` and can be combined with any gradient or solid fill.
+
+```csharp
+public void SetBrushTexture(object? texture)
+public void SetBrushTextureTransform(Transform2D transform)
+public void ClearBrushTexture()
+```
+
+`SetBrushTexture` accepts any backend-specific texture object (the same type your `ICanvasRenderer` produces from `CreateTexture`). When set, the renderer samples the texture and multiplies it with the gradient or vertex colour.
+
+`SetBrushTextureTransform` controls how world-space coordinates map to texture UV coordinates. The transform is applied **in addition to** the current canvas transform at the time of the call:
+
+```csharp
+// Map 128×128 logical units to the full texture
+canvas.SetBrushTexture(myTexture);
+canvas.SetBrushTextureTransform(
+    Transform2D.CreateTranslation(0, 0) * Transform2D.CreateScale(128f, 128f));
+canvas.RectFilled(0, 0, 200, 200, Color32.FromArgb(255, 255, 255, 255));
+canvas.ClearBrushTexture();
+```
+
+When `SetBrushTexture` is called without a prior `SetBrushTextureTransform`, it auto-configures a default transform so that 1 logical unit equals 1 texel (starting at the origin).
+
+<Tip>
+  For a quick full-rect image draw, prefer `canvas.DrawImage(texture, x, y, w, h)` which internally configures the brush and restores it automatically — no manual `ClearBrushTexture` required.
+</Tip>
+
+## Backdrop Blur (Frosted Glass)
+
+Backdrop blur composites a shape over a **blurred copy of the framebuffer behind it**, creating a frosted glass effect. The shape's own fill (solid, gradient, or texture) is layered on top as a translucent tint.
+
+```csharp
+public void SetBackdropBlur(float radius)
+public void ClearBackdropBlur()
+```
+
+`radius` is the blur radius in physical pixels. Pass `0` (or call `ClearBackdropBlur`) to disable. Backdrop blur is orthogonal to the brush type — it works alongside gradients, textures, or solid fills.
+
+<Warning>
+  Backdrop blur requires backend support. Check `ICanvasRenderer.SupportsBackdropBlur` at runtime. When `false`, the renderer draws the fill normally without blurring.
+</Warning>
+
+```csharp
+// Draw colourful content behind the glass
+canvas.CircleFilled(120, 80, 55, Color32.FromArgb(255, 240, 80, 80));
+canvas.CircleFilled(200, 80, 55, Color32.FromArgb(255, 80, 200, 120));
+
+// Frosted glass panel over the content
+canvas.SetBackdropBlur(22f);
+canvas.RoundedRectFilled(
+    80, 40, 160, 90,
+    16, 16, 16, 16,
+    Color32.FromArgb(40, 255, 255, 255)); // very translucent white tint
+canvas.ClearBackdropBlur();
+
+// Glass border for visual clarity
+canvas.BeginPath();
+canvas.RoundedRect(80, 40, 160, 90, 16, 16, 16, 16);
+canvas.SetStrokeColor(Color32.FromArgb(110, 255, 255, 255));
+canvas.SetStrokeWidth(1.5f);
+canvas.Stroke();
+```
+
+## Custom Shaders
+
+For fully custom rendering effects, Prowl.Quill lets you attach a backend-specific shader and pass arbitrary uniforms through the brush:
+
+```csharp
+public void SetCustomShader(object? shader)
+public void SetShaderUniform(string name, object value)
+public void SetShaderUniforms(Dictionary<string, object> uniforms)
+public void ClearCustomShader()
+```
+
+When a custom shader is active, the renderer will **not** set the standard brush uniforms — your shader is responsible for all uniform binding. Supported uniform types: `float`, `int`, `Float2`, `Float3`, `Float4`, `Float4x4`.
+
+```csharp
+// Attach a custom distortion shader
+canvas.SetCustomShader(myDistortionShader);
+canvas.SetShaderUniform("u_time", elapsedSeconds);
+canvas.SetShaderUniform("u_strength", 0.05f);
+
+canvas.RectFilled(0, 0, 400, 300, Color32.FromArgb(255, 255, 255, 255));
+
+canvas.ClearCustomShader();
+```
+
+Shapes using the same shader object and identical uniform values are automatically batched into a single draw call, keeping GPU overhead minimal.
+
+## Brush Properties Reference
+
+<Accordion title="Full Brush struct fields">
+
+| Field | Type | Description |
+|---|---|---|
+| `Type` | `BrushType` | `None`, `Linear`, `Radial`, or `Box`. |
+| `Color1` | `Color32` | Inner/start colour (premultiplied alpha stored internally). |
+| `Color2` | `Color32` | Outer/end colour. |
+| `Point1` | `Float2` | Gradient start/centre point. |
+| `Point2` | `Float2` | Gradient end point; or `(innerRadius, outerRadius)` for radial; or half-size for box. |
+| `CornerRadii` | `float` | Corner radius for box gradients. |
+| `Feather` | `float` | Edge softness for box gradients. |
+| `Transform` | `Transform2D` | World transform captured at brush-set time (used to orient the gradient). |
+| `Texture` | `object?` | Backend texture object, or `null`. |
+| `TextureTransform` | `Transform2D` | Controls UV mapping for the texture. |
+| `BackdropBlur` | `float` | Blur radius in pixels; `0` disables backdrop blur. |
+| `Shader` | `object?` | Custom backend shader, or `null` for the default. |
+| `Uniforms` | `ShaderUniforms?` | Custom uniform values passed to `Shader`. |
+
+</Accordion>

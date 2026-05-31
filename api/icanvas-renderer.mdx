@@ -1,0 +1,298 @@
+---
+title: "ICanvasRenderer — Prowl.Quill Renderer Backend Interface"
+sidebarTitle: "ICanvasRenderer"
+description: "Full reference for the ICanvasRenderer interface: texture lifecycle, draw-call submission, scissor handling, backdrop blur support, and a minimal skeleton implementation."
+---
+
+`ICanvasRenderer` is the contract between Prowl.Quill's retained-mode canvas and a concrete graphics backend — OpenGL, DirectX, Vulkan, Metal, or any other API. Implement this interface once per target platform and pass the instance to the `Canvas` constructor. The canvas itself generates no GPU calls; it only accumulates geometry and state into `Vertex`, index, and `DrawCall` lists. Every frame, `Canvas.Render()` delegates to `ICanvasRenderer.RenderCalls`, handing the backend the full scene to submit.
+
+The interface extends `IDisposable`, so backends are expected to release GPU resources (buffers, shaders, textures) in their `Dispose` implementation.
+
+---
+
+## Interface Declaration
+
+```csharp
+public interface ICanvasRenderer : IDisposable
+```
+
+---
+
+## Texture Management
+
+Quill.Canvas does not own GPU textures directly. Instead it holds opaque
+`object` references and routes all texture operations through the renderer.
+This design lets each backend use its own texture type (OpenGL integer handle,
+DirectX `ShaderResourceView`, etc.) without boxing concerns at the hot path.
+
+### CreateTexture
+
+```csharp
+public object CreateTexture(uint width, uint height);
+```
+
+Allocates a new RGBA texture on the GPU and returns a backend-specific handle.
+Called by the font engine when it needs to expand its glyph atlas.
+
+<ParamField path="width" type="uint">
+  Width of the texture in physical pixels.
+</ParamField>
+
+<ParamField path="height" type="uint">
+  Height of the texture in physical pixels.
+</ParamField>
+
+**Returns:** An opaque `object` that uniquely identifies the texture within
+this backend. The canvas stores this reference in `Brush.Texture` fields and
+passes it back to `GetTextureSize` and `SetTextureData`.
+
+---
+
+### GetTextureSize
+
+```csharp
+public Int2 GetTextureSize(object texture);
+```
+
+Returns the dimensions of a previously created texture. The canvas calls this
+when `Canvas.SetBrushTexture` is used so it can initialise a default 1:1
+texture transform.
+
+<ParamField path="texture" type="object">
+  The opaque texture handle returned by a previous `CreateTexture` call.
+</ParamField>
+
+**Returns:** `Int2` where `X` = width and `Y` = height in physical pixels.
+
+---
+
+### SetTextureData
+
+```csharp
+public void SetTextureData(object texture, IntRect bounds, byte[] data);
+```
+
+Uploads a rectangular region of pixel data to an existing texture. Data is
+always in **RGBA format, 4 bytes per pixel**, row-major with no row padding.
+
+<ParamField path="texture" type="object">
+  The target texture handle.
+</ParamField>
+
+<ParamField path="bounds" type="IntRect">
+  The destination rectangle within the texture. Only the pixels inside this
+  region are updated; the rest remain unchanged. The rect is in texel
+  coordinates with the origin at the top-left.
+</ParamField>
+
+<ParamField path="data" type="byte[]">
+  Raw RGBA bytes. The array must contain exactly
+  `bounds.Width * bounds.Height * 4` bytes. Each group of 4 bytes encodes one
+  pixel as `[R, G, B, A]`.
+</ParamField>
+
+---
+
+## Rendering
+
+### RenderCalls
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls);
+```
+
+Submits all accumulated geometry for a frame. Called once per frame by
+`Canvas.Render()`. The renderer reads the complete vertex and index buffers
+from `canvas.Vertices` and `canvas.Indices`, then iterates `drawCalls` to
+issue one GPU draw command per entry.
+
+<ParamField path="canvas" type="Canvas">
+  The source canvas. Access `canvas.Vertices` and `canvas.Indices` to retrieve
+  geometry. The geometry is valid only for the duration of this call — buffers
+  are cleared at the next `Canvas.BeginFrame`.
+</ParamField>
+
+<ParamField path="drawCalls" type="IReadOnlyList<DrawCall>">
+  Ordered list of draw calls. Each `DrawCall.ElementCount` worth of indices
+  in `canvas.Indices`, taken consecutively, belongs to that draw call.
+</ParamField>
+
+**Rendering contract:**
+
+1. Upload (or update) the vertex and index buffers from `canvas.Vertices` /
+   `canvas.Indices` into GPU buffers.
+2. Iterate `drawCalls` in order, maintaining a running `indexOffset` counter.
+3. For each draw call, bind the texture (`DrawCall.Texture`), activate the
+   shader (`DrawCall.Shader` or default), upload uniforms, set the scissor, and
+   call the underlying draw-indexed command.
+4. Advance `indexOffset` by `drawCall.ElementCount` after each draw call.
+
+---
+
+## Optional Feature
+
+### SupportsBackdropBlur
+
+```csharp
+bool SupportsBackdropBlur => false;
+```
+
+A default interface implementation that returns `false`. Override and return
+`true` in backends that implement the frosted-glass backdrop-blur effect (i.e.,
+capturing and Gaussian-blurring a framebuffer sub-region). When `false`, the
+canvas still emits draw calls with `Brush.BackdropBlur > 0`; the renderer
+simply renders them as flat tinted fills.
+
+```csharp
+public bool SupportsBackdropBlur => true; // opt-in override
+```
+
+---
+
+## Minimal Skeleton Implementation
+
+The following skeleton shows the minimum structure required to implement a
+functional `ICanvasRenderer`. Fill in the graphics-API-specific calls where the
+comments indicate.
+
+```csharp
+using Prowl.Quill;
+using Prowl.Vector;
+using System;
+using System.Collections.Generic;
+
+public sealed class MyCanvasRenderer : ICanvasRenderer
+{
+    // --- GPU resource handles (backend-specific) ---
+    private object _vertexBuffer;
+    private object _indexBuffer;
+    private object _defaultShader;
+
+    public MyCanvasRenderer()
+    {
+        _vertexBuffer  = CreateGpuVertexBuffer();
+        _indexBuffer   = CreateGpuIndexBuffer();
+        _defaultShader = LoadDefaultCanvasShader();
+    }
+
+    // ── Texture lifecycle ─────────────────────────────────────────────────
+
+    public object CreateTexture(uint width, uint height)
+    {
+        // Allocate an RGBA texture on the GPU and return a handle.
+        return AllocateGpuTexture((int)width, (int)height);
+    }
+
+    public Int2 GetTextureSize(object texture)
+    {
+        // Query the texture dimensions from the GPU or a side-table.
+        return QueryTextureDimensions(texture);
+    }
+
+    public void SetTextureData(object texture, IntRect bounds, byte[] data)
+    {
+        // Upload RGBA pixels (4 bytes/pixel) into the specified sub-region.
+        UploadTextureRegion(texture, bounds.X, bounds.Y,
+                            bounds.Width, bounds.Height, data);
+    }
+
+    // ── Frame rendering ───────────────────────────────────────────────────
+
+    public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+    {
+        // 1. Upload geometry
+        UploadVertices(canvas.Vertices);
+        UploadIndices(canvas.Indices);
+
+        int indexOffset = 0;
+
+        foreach (var dc in drawCalls)
+        {
+            // 2. Scissor
+            dc.GetScissor(out Float4x4 scissorMatrix, out Float2 scissorExtent);
+            bool scissorEnabled = scissorExtent.X >= 0;
+
+            // 3. Texture
+            BindTexture(dc.Texture); // null → bind 1×1 white fallback
+
+            // 4. Shader
+            if (dc.Shader != null)
+            {
+                ActivateShader(dc.Shader);
+                if (dc.ShaderUniforms != null)
+                    foreach (var (name, value) in dc.ShaderUniforms.Values)
+                        SetUniform(name, value);
+            }
+            else
+            {
+                ActivateShader(_defaultShader);
+
+                // Upload standard Quill brush uniforms:
+                SetUniform("u_BrushType",     (int)dc.Brush.Type);
+                SetUniform("u_BrushMatrix",   dc.Brush.BrushMatrix);
+                SetUniform("u_Color1",        dc.Brush.Color1);
+                SetUniform("u_Color2",        dc.Brush.Color2);
+                SetUniform("u_Point1",        dc.Brush.Point1);
+                SetUniform("u_Point2",        dc.Brush.Point2);
+                SetUniform("u_CornerRadii",   dc.Brush.CornerRadii);
+                SetUniform("u_Feather",       dc.Brush.Feather);
+                SetUniform("u_TextureMatrix", dc.Brush.TextureMatrix);
+
+                // Upload scissor
+                SetUniform("u_ScissorMatrix", scissorMatrix);
+                SetUniform("u_ScissorExtent",
+                    scissorEnabled ? scissorExtent : new Float2(-1, -1));
+            }
+
+            // 5. Draw
+            DrawIndexedPrimitives(indexOffset, dc.ElementCount);
+            indexOffset += dc.ElementCount;
+        }
+    }
+
+    // ── Capability flags ──────────────────────────────────────────────────
+
+    public bool SupportsBackdropBlur => false;
+
+    // ── Disposal ──────────────────────────────────────────────────────────
+
+    public void Dispose()
+    {
+        DestroyGpuBuffer(_vertexBuffer);
+        DestroyGpuBuffer(_indexBuffer);
+        DestroyShader(_defaultShader);
+    }
+
+    // --- Stubs (replace with real graphics API calls) ---
+    private object AllocateGpuTexture(int w, int h) => throw new NotImplementedException();
+    private Int2   QueryTextureDimensions(object t)  => throw new NotImplementedException();
+    private void   UploadTextureRegion(object t, int x, int y, int w, int h, byte[] d) { }
+    private object CreateGpuVertexBuffer() => throw new NotImplementedException();
+    private object CreateGpuIndexBuffer()  => throw new NotImplementedException();
+    private object LoadDefaultCanvasShader() => throw new NotImplementedException();
+    private void   UploadVertices(IReadOnlyList<Vertex> v)   { }
+    private void   UploadIndices(IReadOnlyList<uint> i)      { }
+    private void   BindTexture(object? t)                    { }
+    private void   ActivateShader(object s)                  { }
+    private void   SetUniform(string n, object v)            { }
+    private void   DrawIndexedPrimitives(int offset, int count) { }
+    private void   DestroyGpuBuffer(object b)                { }
+    private void   DestroyShader(object s)                   { }
+}
+```
+
+---
+
+## Wiring the Renderer to a Canvas
+
+```csharp
+var renderer = new MyCanvasRenderer();
+var canvas   = new Canvas(renderer, FontAtlasSettings.Default);
+
+// Each frame:
+canvas.BeginFrame(windowWidth, windowHeight, devicePixelRatio);
+
+// ... drawing calls ...
+
+canvas.Render(); // → calls renderer.RenderCalls(...)
+```

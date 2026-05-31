@@ -1,0 +1,256 @@
+---
+title: "Performance Best Practices for Prowl.Quill"
+sidebarTitle: "Performance"
+description: "Maximise frame rate in Prowl.Quill with draw-call batching, hardware primitives, pre-built layouts, tessellation tuning, and HiDPI framebuffer scale tips."
+---
+
+Prowl.Quill is designed to be fast out of the box — the entire rendering core is under 1 000 lines of executable code, and the API eliminates unnecessary allocations wherever possible. Even so, understanding how the library batches draw calls, how tessellation tolerances trade quality for speed, and when to reuse pre-built text layouts will help you sustain high frame rates even when drawing tens of thousands of shapes per frame.
+
+## Draw call batching
+
+The canvas automatically merges consecutive shapes into a single GPU draw call whenever they share the same **scissor region**, **brush** (colour, gradient, texture), and **shader + uniforms**. No manual grouping is required — draw similar shapes back-to-back and the renderer handles the rest.
+
+```csharp
+// All three circles share the same brush → one draw call
+canvas.SetFillColor(Color32.FromArgb(200, 80, 160, 255));
+canvas.CircleFilled(100f, 100f, 30f, Color32.FromArgb(200, 80, 160, 255));
+canvas.CircleFilled(200f, 100f, 30f, Color32.FromArgb(200, 80, 160, 255));
+canvas.CircleFilled(300f, 100f, 30f, Color32.FromArgb(200, 80, 160, 255));
+
+// Changing the colour starts a new draw call
+canvas.CircleFilled(400f, 100f, 30f, Color32.FromArgb(200, 255, 100, 80));
+```
+
+### What breaks a batch
+
+<CardGroup cols={2}>
+  <Card title="State changes" icon="sliders">
+    Setting a different fill colour, stroke colour, brush (gradient/texture), scissor rectangle, or custom shader always opens a new draw call on the next shape.
+  </Card>
+  <Card title="RequestNewDrawCall()" icon="plus">
+    Call `RequestNewDrawCall()` when you need to guarantee a rendering-order boundary — for example, when a transparent shape must composite over an opaque one drawn in the same frame.
+  </Card>
+</CardGroup>
+
+```csharp
+// Force a new draw call to ensure correct transparency layering
+canvas.RectFilled(50f, 50f, 200f, 100f, Color32.FromArgb(255, 40, 40, 80));
+canvas.RequestNewDrawCall();
+canvas.RectFilled(80f, 70f, 140f, 60f, Color32.FromArgb(120, 255, 255, 255));
+```
+
+<Tip>
+Sort your draw commands by shader → texture → brush → scissor to maximise batching opportunities. The benchmark scene in Prowl.Quill draws **79 000 rectangles and 1 000 circles** per frame using this principle and sustains very high frame rates.
+</Tip>
+
+## Prefer hardware-accelerated primitives
+
+The `*Filled` family of methods (`RectFilled`, `RoundedRectFilled`, `CircleFilled`, `PieFilled`) uses shader-based antialiasing and bypasses the CPU path-tessellation pipeline entirely. They are significantly faster than the equivalent path API for simple shapes:
+
+<Tabs>
+  <Tab title="Fast (shader-based AA)">
+    ```csharp
+    // Single method call, no tessellation, AA handled in GPU shader
+    canvas.RectFilled(x, y, width, height, color);
+    canvas.CircleFilled(cx, cy, radius, color);
+    canvas.RoundedRectFilled(x, y, width, height, radius, color);
+    canvas.PieFilled(cx, cy, radius, startAngle, endAngle, color);
+    ```
+  </Tab>
+  <Tab title="Slower (path tessellation)">
+    ```csharp
+    // Creates sub-paths, runs CPU tessellator, then uploads triangles
+    canvas.BeginPath();
+    canvas.MoveTo(x, y);
+    canvas.LineTo(x + width, y);
+    canvas.LineTo(x + width, y + height);
+    canvas.LineTo(x, y + height);
+    canvas.ClosePath();
+    canvas.Fill();
+    ```
+  </Tab>
+</Tabs>
+
+Reserve `BeginPath` / `Fill` / `FillComplex` for genuinely irregular shapes — concave polygons, shapes with holes, and SVG-style paths — where no built-in primitive applies.
+
+## Tessellation tolerance
+
+```csharp
+public void SetTessellationTolerance(float tolerance = 0.5f)
+```
+
+The tessellation tolerance controls how closely Bézier curve and arc approximations must follow the true curve before subdivision stops. The default is `0.5` (half a logical pixel), which is barely visible. Raising it reduces the triangle count for curved paths at the cost of slight faceting:
+
+```csharp
+// Coarser tessellation — faster, slightly faceted curves
+canvas.SetTessellationTolerance(2.0f);
+
+// Finer tessellation — smoother curves, more triangles (default)
+canvas.SetTessellationTolerance(0.5f);
+```
+
+Only affects `BezierCurveTo`, `QuadraticCurveTo`, and path-based `Arc`. Shader-based primitives (`CircleFilled`, etc.) are unaffected.
+
+## Arc segment density
+
+```csharp
+public void SetRoundingMinDistance(float distance = 3f)
+```
+
+Controls the minimum arc segment length (in logical units) for `Arc`, `Circle`, `RoundedRect`, and their filled equivalents. A higher value means fewer segments per arc — fewer CPU triangles but potentially more visible faceting on very large circles:
+
+```csharp
+// Fewer arc segments for a large number of small circles
+canvas.SetRoundingMinDistance(6f);
+
+// More segments for a large, prominent circle (default)
+canvas.SetRoundingMinDistance(3f);
+```
+
+<Note>
+For shader-based filled primitives (`CircleFilled`, `RoundedRectFilled`), segment count also affects CPU cost, but the GPU AA fringe still looks smooth regardless. Raising `RoundingMinDistance` to `5–8` is a safe optimisation for scenes with many small circles.
+</Note>
+
+## Reuse text layouts across frames
+
+Pre-building a text layout once is one of the most impactful optimisations available for text-heavy UIs.
+
+### Static text: CreateLayout + DrawLayout
+
+```csharp
+public TextLayout CreateLayout(string text, TextLayoutSettings settings)
+public void DrawLayout(TextLayout layout, float x, float y, Color32 color, Float2? origin = null)
+```
+
+`CreateLayout` runs the font engine's glyph shaping and line-breaking pipeline and returns an object whose geometry is frozen. `DrawLayout` simply submits that geometry — no shaping, no line-breaking, no per-character measurement:
+
+```csharp
+// Create once (e.g., at startup or when text changes)
+TextLayout labelLayout = canvas.CreateLayout("Score: 9999", new TextLayoutSettings
+{
+    Font      = uiFont,
+    PixelSize = 20f,
+});
+
+// Draw many times per frame at negligible cost
+canvas.DrawLayout(labelLayout, 10f, 10f, Color.White);
+```
+
+### Rich text: reuse QuillRichText
+
+```csharp
+// Create once
+QuillRichText richText = canvas.CreateRichText(source, settings);
+
+// Draw every frame — parsing and layout are not repeated
+canvas.DrawRichText(richText, position, currentTime);
+```
+
+Call `QuillRichText.Reset()` to replay animations without recreating the object. Only call `CreateRichText` again when the source text or layout settings change.
+
+### Markdown: reuse QuillMarkdown
+
+```csharp
+// Create once per document
+QuillMarkdown doc = canvas.CreateMarkdown(markdownSource, settings);
+
+// Draw at zero extra allocation cost each frame
+canvas.DrawMarkdown(doc, new Float2(x, y));
+```
+
+Recreate the `QuillMarkdown` object only when the source or the available width changes.
+
+## HiDPI and framebuffer scale
+
+```csharp
+public void BeginFrame(float width, float height, float framebufferScale = 1.0f)
+```
+
+The `framebufferScale` parameter tells the canvas how many physical pixels correspond to one logical unit. On a Retina or HiDPI display, this is typically `2.0`. Passing the correct value is critical for both visual quality and performance:
+
+<CardGroup cols={2}>
+  <Card title="Correct scale" icon="check">
+    At `framebufferScale = 2.0`, glyph atlases are rasterised at 2× density, AA fringe widths shrink to sub-pixel size, and everything looks crisp without any changes to your drawing code.
+  </Card>
+  <Card title="Wrong scale" icon="x">
+    At `framebufferScale = 1.0` on a HiDPI display, glyphs are rasterised at 1× and upscaled by the OS, producing blurry text and thick AA fringes. Conversely, using `2.0` on a 1× display over-rasterises and wastes GPU memory.
+  </Card>
+</CardGroup>
+
+```csharp
+// Query the OS for the true scale factor (example — actual API is backend-specific)
+float dpiScale = window.DevicePixelRatio; // 1.0, 1.5, 2.0, etc.
+
+canvas.BeginFrame(
+    width:             window.ClientWidth  / dpiScale,
+    height:            window.ClientHeight / dpiScale,
+    framebufferScale:  dpiScale);
+```
+
+Use `canvas.PixelToLogical(rawMousePos)` to convert physical-pixel mouse coordinates back to logical units for hit-testing.
+
+## Benchmark insights
+
+The `BenchmarkScene` sample draws **79 000 rectangles** and **1 000 circles** every frame, each with an independent transform (translate + rotate + scale) and an animated colour. Key techniques it uses that you can apply in production:
+
+<Accordion title="Deterministic random numbers with a custom LCG">
+  Creating a `System.Random` inside the hot loop is expensive. The benchmark uses a simple LCG (Linear Congruential Generator) to produce pseudo-random floats at near-zero cost:
+
+  ```csharp
+  private uint _randomState = 42;
+
+  private float NextFloat()
+  {
+      _randomState = _randomState * 1103515245u + 12345u;
+      return (_randomState >> 8) * (1.0f / 16777216.0f);
+  }
+  ```
+</Accordion>
+
+<Accordion title="Precomputed time values outside the loop">
+  Time-dependent colour calculations use `Maths.Sin` which is not free. Computing the time argument multipliers once before the loop avoids redundant floating-point work:
+
+  ```csharp
+  float colorTimeR = _time * 2f;
+  float colorTimeG = _time * 1.5f;
+  float colorTimeB = _time * 1.8f;
+
+  for (int i = 0; i < RECT_COUNT; i++)
+  {
+      byte r = (byte)(128 + 127 * Maths.Sin(colorTimeR + i * 0.01f));
+      byte g = (byte)(128 + 127 * Maths.Sin(colorTimeG + i * 0.015f));
+      byte b = (byte)(128 + 127 * Maths.Sin(colorTimeB + i * 0.008f));
+      // ...
+  }
+  ```
+</Accordion>
+
+<Accordion title="Transform caching">
+  Rather than calling `GetTransform` inside the loop, the benchmark caches the root transform once and restores it with `CurrentTransform` for each shape — avoiding multiple matrix multiplications:
+
+  ```csharp
+  var curTransform = canvas.GetTransform();
+
+  for (int i = 0; i < RECT_COUNT; i++)
+  {
+      canvas.CurrentTransform(curTransform);          // cheap: direct assignment
+      canvas.TransformBy(Transform2D.CreateTranslation(x, y));
+      canvas.TransformBy(Transform2D.CreateRotation(rotation));
+      canvas.TransformBy(Transform2D.CreateScale(scale, scale));
+      canvas.RectFilled(-w / 2, -h / 2, w, h, color);
+  }
+  ```
+</Accordion>
+
+## Quick reference
+
+| Practice | Impact |
+|---|---|
+| Use `RectFilled`, `CircleFilled`, `RoundedRectFilled` for simple shapes | High — skips CPU tessellation |
+| Draw shapes with the same shader/brush consecutively | High — maximises batching |
+| Use `CreateLayout` + `DrawLayout` for static text | High — eliminates per-frame font shaping |
+| Reuse `QuillRichText` / `QuillMarkdown` across frames | High — layout computed once |
+| Set `framebufferScale` correctly for HiDPI | High — crispness and atlas efficiency |
+| Increase `SetRoundingMinDistance` for many small arcs | Medium — fewer CPU triangles |
+| Increase `SetTessellationTolerance` for curved paths | Medium — fewer Bézier subdivisions |
+| Call `RequestNewDrawCall()` only when necessary | Medium — unnecessary calls fragment batches |

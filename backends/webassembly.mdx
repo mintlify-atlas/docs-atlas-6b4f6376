@@ -1,0 +1,273 @@
+---
+title: "WebAssembly Backend for Prowl.Quill Vector Graphics"
+sidebarTitle: "WebAssembly"
+description: "Run Prowl.Quill in the browser with .NET WASM and WebGL 2. Covers project setup, WebGLInterop, JSExport frame callbacks, and serialising draw calls across the JS boundary."
+---
+
+The WebAssembly backend makes Prowl.Quill run entirely in the browser. The .NET WASM runtime executes the Quill geometry tessellation on the CPU side, then serialises the resulting vertex and draw-call data across the JavaScript boundary to a thin WebGL 2 renderer written in JS. Frame callbacks are exported via `[JSExport]` attributes and called from a `requestAnimationFrame` loop on the JavaScript side. Resources such as fonts, textures, and SVG files are embedded as assembly resources rather than loaded from the file system, since WASM has no traditional filesystem access.
+
+## Project Setup
+
+The WASM example is a .NET WASM project (not Blazor — it is a bare `dotnet-sdk` WASM app). The key project file settings are:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+</Project>
+```
+
+Assets (fonts, textures, SVGs) should be added as `<EmbeddedResource>` items so they are included in the WASM bundle.
+
+## Entry Point and `[JSExport]` Callbacks
+
+The static `Main` method is empty — actual initialisation happens in `Init`, which the JavaScript loader calls after all WASM module imports are ready. Each interactive event (frame, mouse, keyboard) has a corresponding `[JSExport]` method:
+
+```csharp
+static void Main()
+{
+    // Entry point — actual init happens in Init() called from JS after module imports are ready.
+}
+
+[JSExport]
+internal static void Init()
+{
+    WebGLInterop.InitWebGL("canvas");
+
+    _renderer = new WebGLCanvasRenderer();
+    var (cw, ch) = _renderer.GetCanvasSize();
+    _canvas = new Canvas(_renderer, new FontAtlasSettings());
+
+    // Load fonts from embedded resources
+    var robotoFont = LoadFontResource(asm, "Fonts.Roboto.ttf");
+    var alamakFont = LoadFontResource(asm, "Fonts.Alamak.ttf");
+
+    _demos = new List<IDemo>
+    {
+        new CanvasDemo(_canvas, wallTexture!, robotoFont!, alamakFont!),
+        new SVGDemo(_canvas),
+        new BenchmarkScene(_canvas, robotoFont!),
+    };
+}
+```
+
+The per-frame callback receives a delta time from the JS `requestAnimationFrame` scheduler:
+
+```csharp
+[JSExport]
+internal static void OnFrame(double deltaTimeD)
+{
+    if (_demos.Count == 0) return;
+
+    float deltaTime = Math.Clamp((float)deltaTimeD, 0.001f, 0.1f);
+
+    if (_keyQ) _rotation += 10f * deltaTime;
+    if (_keyE) _rotation -= 10f * deltaTime;
+
+    var (cw, ch) = _renderer.GetCanvasSize();
+    _canvas.BeginFrame(cw, ch);
+    _demos[_currentDemoIndex].RenderFrame(deltaTime, _offset, _zoom, _rotation);
+    _canvas.Render();
+}
+```
+
+Input events are forwarded from JS DOM event listeners:
+
+```csharp
+[JSExport]
+internal static void OnMouseMove(double x, double y)
+{
+    _prevMouseX = _mouseX; _prevMouseY = _mouseY;
+    _mouseX = x; _mouseY = y;
+
+    if (_mouseDown)
+    {
+        float dx = (float)(_mouseX - _prevMouseX);
+        float dy = (float)(_mouseY - _prevMouseY);
+        _offset.X += dx * (1f / _zoom);
+        _offset.Y += dy * (1f / _zoom);
+    }
+}
+
+[JSExport] internal static void OnMouseDown() => _mouseDown = true;
+[JSExport] internal static void OnMouseUp()   => _mouseDown = false;
+
+[JSExport]
+internal static void OnWheel(double deltaY)
+{
+    _zoom += -(float)deltaY * 0.001f;
+    if (_zoom < 0.1f) _zoom = 0.1f;
+}
+
+[JSExport]
+internal static void OnKeyDown(string key)
+{
+    switch (key)
+    {
+        case "q": case "Q": _keyQ = true; break;
+        case "e": case "E": _keyE = true; break;
+        case "ArrowLeft":
+            _currentDemoIndex = _currentDemoIndex - 1 < 0 ? _demos.Count - 1 : _currentDemoIndex - 1;
+            break;
+        case "ArrowRight":
+            _currentDemoIndex = (_currentDemoIndex + 1) % _demos.Count;
+            break;
+    }
+}
+```
+
+## `WebGLCanvasRenderer` — The `ICanvasRenderer` Implementation
+
+`WebGLCanvasRenderer` uses integer texture IDs rather than GPU objects. Quill receives these IDs as opaque `object` references, and the renderer maintains a dictionary mapping ID → size. The actual WebGL texture lives on the JavaScript side, keyed by the same integer:
+
+```csharp
+public class WebGLCanvasRenderer : ICanvasRenderer
+{
+    private int _nextTextureId = 1;
+    private readonly Dictionary<int, (int w, int h)> _textureSizes = new();
+
+    private const int VERTEX_SIZE = 20; // 8 position + 8 uv + 4 color
+    private const int DC_INFO_STRIDE = 2; // texId, elemCount
+}
+```
+
+### Texture Methods
+
+```csharp
+public object CreateTexture(uint width, uint height)
+{
+    int texId = _nextTextureId++;
+    _textureSizes[texId] = ((int)width, (int)height);
+    WebGLInterop.CreateTexture(texId, (int)width, (int)height);
+    return texId;
+}
+
+public Int2 GetTextureSize(object texture)
+{
+    int texId = (int)texture;
+    if (_textureSizes.TryGetValue(texId, out var size))
+        return new Int2(size.w, size.h);
+    return new Int2(0, 0);
+}
+
+public void SetTextureData(object texture, IntRect bounds, byte[] data)
+{
+    int texId = (int)texture;
+    WebGLInterop.SetTextureData(texId,
+        bounds.Min.X, bounds.Min.Y,
+        bounds.Size.X, bounds.Size.Y,
+        data);
+}
+```
+
+### `RenderCalls` — Serialisation Across the JS Boundary
+
+Because calling into JavaScript has non-trivial overhead, `RenderCalls` marshals the entire frame into a small set of pre-allocated typed arrays and forwards them to the JS renderer in a single `WebGLInterop.Render` call:
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    if (drawCalls.Count == 0) return;
+
+    int vertexCount = canvas.Vertices.Count;
+    int indexCount  = canvas.Indices.Count;
+    int dcCount     = drawCalls.Count;
+
+    // Serialise vertices to raw bytes (20 bytes each: x,y,u,v + r,g,b,a)
+    var vertexBuffer = new byte[vertexCount * VERTEX_SIZE];
+    for (int i = 0; i < vertexCount; i++)
+    {
+        var v      = canvas.Vertices[i];
+        int offset = i * VERTEX_SIZE;
+        BitConverter.TryWriteBytes(vertexBuffer.AsSpan(offset),      v.x);
+        BitConverter.TryWriteBytes(vertexBuffer.AsSpan(offset + 4),  v.y);
+        BitConverter.TryWriteBytes(vertexBuffer.AsSpan(offset + 8),  v.u);
+        BitConverter.TryWriteBytes(vertexBuffer.AsSpan(offset + 12), v.v);
+        vertexBuffer[offset + 16] = v.r;
+        vertexBuffer[offset + 17] = v.g;
+        vertexBuffer[offset + 18] = v.b;
+        vertexBuffer[offset + 19] = v.a;
+    }
+
+    // Serialise indices
+    var indexBuffer = new int[indexCount];
+    for (int i = 0; i < indexCount; i++)
+        indexBuffer[i] = (int)canvas.Indices[i];
+
+    // Serialise per-draw-call info: [texId, elemCount] per entry
+    var dcInfoBuffer = new int[dcCount * DC_INFO_STRIDE];
+    // Serialise scissor matrices (16 doubles) + extent (2 doubles) = 18 per draw call
+    var scissorBuffer = new double[dcCount * 18];
+    // Serialise brush data: type(1) + brushMat(16) + color1(4) + color2(4)
+    //   + params(4) + params2(2) + textureMat(16) = 47 per draw call
+    var brushBuffer = new double[dcCount * 47];
+
+    for (int i = 0; i < dcCount; i++)
+    {
+        var dc  = drawCalls[i];
+        int di  = i * DC_INFO_STRIDE;
+        int s   = i * 18;
+        int b   = i * 47;
+
+        dcInfoBuffer[di]     = dc.Texture != null ? (int)dc.Texture : 0;
+        dcInfoBuffer[di + 1] = dc.ElementCount;
+
+        dc.GetScissor(out var scissorMat, out var scissorExt);
+        for (int col = 0; col < 4; col++)
+            for (int row = 0; row < 4; row++)
+                scissorBuffer[s + col * 4 + row] = scissorMat[row, col];
+        scissorBuffer[s + 16] = scissorExt.X;
+        scissorBuffer[s + 17] = scissorExt.Y;
+
+        brushBuffer[b] = (int)dc.Brush.Type;
+        var bm = dc.Brush.BrushMatrix;
+        for (int col = 0; col < 4; col++)
+            for (int row = 0; row < 4; row++)
+                brushBuffer[b + 1 + col * 4 + row] = bm[row, col];
+
+        brushBuffer[b + 17] = dc.Brush.Color1.R / 255.0;
+        brushBuffer[b + 18] = dc.Brush.Color1.G / 255.0;
+        brushBuffer[b + 19] = dc.Brush.Color1.B / 255.0;
+        brushBuffer[b + 20] = dc.Brush.Color1.A / 255.0;
+        brushBuffer[b + 21] = dc.Brush.Color2.R / 255.0;
+        // ... remaining Color2, Points, CornerRadii, Feather, TextureMatrix ...
+    }
+
+    double scale = canvas.FramebufferScale;
+    WebGLInterop.Render(vertexBuffer, indexBuffer, dcInfoBuffer,
+                        scissorBuffer, brushBuffer, scale);
+}
+
+public void Dispose() { }
+```
+
+## Loading Embedded Resources
+
+Assets are loaded from assembly embedded resources rather than the filesystem. Here is the texture loading helper used in `Init`:
+
+```csharp
+private static object? LoadTextureResource(Assembly asm, string logicalName)
+{
+    using var stream = asm.GetManifestResourceStream(logicalName);
+    if (stream == null) return null;
+
+    var image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+    var texId = _renderer.CreateTexture((uint)image.Width, (uint)image.Height);
+    _renderer.SetTextureData(texId,
+        new IntRect(0, 0, image.Width, image.Height),
+        image.Data);
+    return texId;
+}
+```
+
+<Note>
+  The WASM backend does **not** support `SupportsBackdropBlur`. Backdrop blur requires direct access to framebuffer contents via a blit or capture API, which is not available through the current `WebGLInterop` layer.
+</Note>
+
+<Tip>
+  To minimise payload size, publish with `dotnet publish -c Release`. The WASM runtime will tree-shake unused assemblies. For further compression, enable Brotli encoding on your web server for `.wasm` files.
+</Tip>

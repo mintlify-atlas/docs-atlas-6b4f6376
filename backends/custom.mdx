@@ -1,0 +1,343 @@
+---
+title: "Implementing a Custom Prowl.Quill Renderer Backend"
+sidebarTitle: "Custom Backend"
+description: "Full guide to implementing ICanvasRenderer for any graphics API. Covers all four methods, the DrawCall model, Brush and Scissor data, and a complete skeleton."
+---
+
+Prowl.Quill is completely decoupled from any specific graphics API. All rendering passes through a single interface — `ICanvasRenderer` — which you implement once for your target platform. You could write a backend for Vulkan, Metal, DirectX 11/12, a software rasteriser, or any other rendering system without changing a single line of Quill's core tessellation code. This guide walks you through the full interface, explains what each method and property must do, and provides an annotated skeleton you can use as a starting point.
+
+## The Full Interface
+
+```csharp
+public interface ICanvasRenderer : IDisposable
+{
+    /// <summary>
+    /// Creates a new texture with the specified dimensions.
+    /// </summary>
+    /// <param name="width">Width in pixels.</param>
+    /// <param name="height">Height in pixels.</param>
+    /// <returns>A backend-specific texture object (any reference type).</returns>
+    public object CreateTexture(uint width, uint height);
+
+    /// <summary>
+    /// Gets the dimensions of a texture previously created by CreateTexture.
+    /// </summary>
+    /// <param name="texture">The texture object returned by CreateTexture.</param>
+    /// <returns>Width and height in pixels.</returns>
+    public Int2 GetTextureSize(object texture);
+
+    /// <summary>
+    /// Updates a rectangular region of a texture with new pixel data.
+    /// </summary>
+    /// <param name="texture">The texture to update.</param>
+    /// <param name="bounds">The rectangular region to update.</param>
+    /// <param name="data">Pixel data in RGBA format, 4 bytes per pixel, row-major.</param>
+    public void SetTextureData(object texture, IntRect bounds, byte[] data);
+
+    /// <summary>
+    /// Renders the accumulated draw calls to the screen or render target.
+    /// Called once per frame by canvas.Render().
+    /// </summary>
+    /// <param name="canvas">The canvas — provides Vertices and Indices.</param>
+    /// <param name="drawCalls">Ordered list of draw calls to execute.</param>
+    public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls);
+
+    /// <summary>
+    /// Return true if your backend implements backdrop blur (frosted-glass fills).
+    /// When false, backdrop-blur draw calls degrade to flat tinted fills.
+    /// </summary>
+    bool SupportsBackdropBlur => false;
+}
+```
+
+<Note>
+  `ICanvasRenderer` extends `IDisposable`. Always release GPU resources (buffers, textures, shaders, framebuffers) in your `Dispose` implementation.
+</Note>
+
+## Understanding the `DrawCall` Model
+
+When you call `canvas.Render()`, Quill calls `RenderCalls(canvas, drawCalls)` with the complete vertex buffer (`canvas.Vertices`), index buffer (`canvas.Indices`), and a list of `DrawCall` objects. All draw calls share the same vertex and index buffers — each `DrawCall` identifies its slice of the index buffer via `ElementCount`, which is a count of individual index values (always a multiple of 3 for triangles).
+
+```
+canvas.Vertices  ─────────────────────────────────────────────────►
+                 [v0][v1][v2][v3][v4][v5][v6][v7]...
+
+canvas.Indices   ─────────────────────────────────────────────────►
+                 [0,1,2, 3,4,5, 2,5,6, ...]
+                 ├──DC0──┤├──DC1──┤├──DC2────────┤
+                 ElementCount=3  =3   =6
+
+DrawCalls[0].ElementCount = 3  → indices 0..2
+DrawCalls[1].ElementCount = 3  → indices 3..5
+DrawCalls[2].ElementCount = 6  → indices 6..11
+```
+
+To draw call `i`, you must first accumulate the total index offset from all previous draw calls, then issue a draw using `drawCall.ElementCount` indices starting at that offset:
+
+```csharp
+int indexOffset = 0;
+foreach (var drawCall in drawCalls)
+{
+    // ... set state for this draw call ...
+    DrawIndexed(drawCall.ElementCount, startIndex: indexOffset);
+    indexOffset += drawCall.ElementCount;
+}
+```
+
+## The `Brush` — Fill Style
+
+Each `DrawCall` exposes a `Brush` that describes how the shape should be filled:
+
+| Property | Type | Description |
+|---|---|---|
+| `Type` | `BrushType` | `None`, `Linear`, `Radial`, or `Box` |
+| `Color1` / `Color2` | `Color32` | Start and end gradient colours (RGBA) |
+| `BrushMatrix` | `Float4x4` | Transform applied to the fill coordinate space |
+| `Point1` / `Point2` | `Float2` | Gradient control points (start/end for linear, center/radius for radial) |
+| `CornerRadii` | `double` | Box gradient corner radius |
+| `Feather` | `double` | Box gradient feather width |
+| `TextureMatrix` | `Float4x4` | Transform for texture-coordinate sampling |
+| `BackdropBlur` | `double` | Blur radius; `> 0` triggers frosted-glass mode |
+
+Pass these values directly to your shader as uniforms. All six production backends use the same uniform names (`brushType`, `brushMat`, `brushColor1`, `brushColor2`, `brushParams`, `brushParams2`, `brushTextureMat`) so you can lift the GLSL fragment shader from `CanvasShaderSource.FragmentShader` with minimal modification.
+
+## The Scissor — Clipping Region
+
+Call `drawCall.GetScissor(out Float4x4 scissorMat, out Float2 scissorExt)` to retrieve the active scissor. The scissor is represented as a centre/half-extents pair in transformed space rather than as a raw pixel rectangle, which allows rotated clip regions. Pass both values to the shader; when `scissorExt.X < 0`, scissoring is disabled and the shader returns `1.0` for the mask unconditionally.
+
+## Custom Shaders and Uniforms
+
+`DrawCall.Shader` is an `object?` that may hold a backend-specific shader handle (e.g. `int` program in OpenGL, `uint` in Silk.NET). When non-null, switch to that shader instead of the default one. Extra data for the custom shader is provided via `DrawCall.ShaderUniforms`, which exposes a `Dictionary<string, object>` of typed values:
+
+```csharp
+if (drawCall.Shader is int customProgram)
+{
+    UseProgram(customProgram);
+    if (drawCall.ShaderUniforms != null)
+    {
+        foreach (var kvp in drawCall.ShaderUniforms.Values)
+        {
+            int loc = GetUniformLocation(customProgram, kvp.Key);
+            switch (kvp.Value)
+            {
+                case float f:    Uniform1(loc, f);          break;
+                case int i:      Uniform1(loc, i);          break;
+                case Float2 v2:  Uniform2(loc, v2.X, v2.Y); break;
+                case Float4 v4:  Uniform4(loc, v4);         break;
+                case Float4x4 m: UniformMatrix4(loc, m);    break;
+            }
+        }
+    }
+}
+```
+
+## Texture Binding
+
+`DrawCall.Texture` is an `object?` that holds whatever value your `CreateTexture` method returned. When `null`, bind a fallback 1×1 white texture so the shader can still sample safely.
+
+---
+
+## Complete Skeleton Implementation
+
+<Steps>
+
+<Step title="Declare the class and fields">
+
+```csharp
+using Prowl.Quill;
+using Prowl.Vector;
+using Prowl.Vector.Geometry;
+using System.Collections.Generic;
+
+public class MyRenderer : ICanvasRenderer
+{
+    // Example: store a GPU texture handle alongside its dimensions
+    private record GpuTexture(int Handle, int Width, int Height);
+
+    private int _shaderProgram;   // compiled shader
+    private int _vao, _vbo, _ebo; // GPU geometry buffers
+    private GpuTexture _defaultTex;
+
+    // Opt into backdrop blur only if you implement the capture+blur pipeline
+    public bool SupportsBackdropBlur => false;
+}
+```
+
+</Step>
+
+<Step title="Implement texture management">
+
+Quill calls `CreateTexture` when it needs to allocate the glyph atlas or a user texture. The returned object is treated as an opaque handle and passed back into `GetTextureSize` and `SetTextureData`.
+
+```csharp
+public object CreateTexture(uint width, uint height)
+{
+    // Allocate a GPU texture however your API requires
+    int handle = MyGpuApi.GenTexture();
+    MyGpuApi.TexImage2D(handle, (int)width, (int)height, format: RGBA8);
+    return new GpuTexture(handle, (int)width, (int)height);
+}
+
+public Int2 GetTextureSize(object texture)
+{
+    if (texture is not GpuTexture t)
+        throw new ArgumentException("Expected GpuTexture");
+    return new Int2(t.Width, t.Height);
+}
+
+public void SetTextureData(object texture, IntRect bounds, byte[] data)
+{
+    if (texture is not GpuTexture t)
+        throw new ArgumentException("Expected GpuTexture");
+    // Upload pixel data to the sub-region [bounds.Min .. bounds.Min + bounds.Size]
+    MyGpuApi.TexSubImage2D(t.Handle,
+        bounds.Min.X, bounds.Min.Y,
+        bounds.Size.X, bounds.Size.Y,
+        data);
+}
+```
+
+</Step>
+
+<Step title="Upload geometry and configure vertex layout">
+
+Inside `RenderCalls`, upload `canvas.Vertices` and `canvas.Indices` to the GPU once per frame. Each `Vertex` is 20 bytes: `float x, y, u, v` followed by `byte r, g, b, a`.
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    if (drawCalls.Count == 0) return;
+
+    // Upload vertex buffer (20 bytes per vertex)
+    MyGpuApi.BufferData(_vbo, canvas.Vertices.ToArray(),
+        stride: Vertex.SizeInBytes);
+
+    // Vertex attribute layout:
+    //  Location 0: vec2  position  – offset  0, 8 bytes
+    //  Location 1: vec2  texcoord  – offset  8, 8 bytes
+    //  Location 2: vec4u color     – offset 16, 4 bytes (normalised)
+    MyGpuApi.VertexAttrib(location: 0, components: 2, type: Float,   offset:  0);
+    MyGpuApi.VertexAttrib(location: 1, components: 2, type: Float,   offset:  8);
+    MyGpuApi.VertexAttrib(location: 2, components: 4, type: UByte,   offset: 16, normalised: true);
+
+    // Upload index buffer (uint per index)
+    MyGpuApi.BufferData(_ebo, canvas.Indices.ToArray());
+
+    // ... continue to draw loop below ...
+}
+```
+
+</Step>
+
+<Step title="Iterate draw calls and set per-draw-call state">
+
+For each `DrawCall`, bind the correct texture, switch shaders if necessary, upload uniforms, and issue the indexed draw call.
+
+```csharp
+    // Continued inside RenderCalls:
+    int indexOffset = 0;
+    foreach (var drawCall in drawCalls)
+    {
+        // 1. Texture
+        var tex = (drawCall.Texture as GpuTexture) ?? _defaultTex;
+        MyGpuApi.BindTexture(tex.Handle);
+
+        // 2. Shader selection
+        int activeProgram = _shaderProgram;
+        if (drawCall.Shader is int customProgram)
+            activeProgram = customProgram;
+        MyGpuApi.UseProgram(activeProgram);
+
+        // 3. Standard uniforms (when using the default shader)
+        if (drawCall.Shader == null)
+        {
+            MyGpuApi.SetFloat ("dpiScale",    (float)canvas.FramebufferScale);
+            MyGpuApi.SetMatrix("projection",  _projection);
+
+            drawCall.GetScissor(out var scissorMat, out var scissorExt);
+            MyGpuApi.SetMatrix("scissorMat", scissorMat);
+            MyGpuApi.SetFloat2("scissorExt", (float)scissorExt.X, (float)scissorExt.Y);
+
+            var brush = drawCall.Brush;
+            MyGpuApi.SetInt   ("brushType",   (int)brush.Type);
+            MyGpuApi.SetMatrix("brushMat",    brush.BrushMatrix);
+            MyGpuApi.SetFloat4("brushColor1", brush.Color1);
+            MyGpuApi.SetFloat4("brushColor2", brush.Color2);
+            MyGpuApi.SetFloat4("brushParams",
+                (float)brush.Point1.X, (float)brush.Point1.Y,
+                (float)brush.Point2.X, (float)brush.Point2.Y);
+            MyGpuApi.SetFloat2("brushParams2",
+                (float)brush.CornerRadii, (float)brush.Feather);
+            MyGpuApi.SetMatrix("brushTextureMat", brush.TextureMatrix);
+        }
+
+        // 4. Custom uniforms
+        if (drawCall.ShaderUniforms != null)
+            BindCustomUniforms(activeProgram, drawCall.ShaderUniforms);
+
+        // 5. Draw
+        MyGpuApi.DrawIndexed(
+            count:       drawCall.ElementCount,
+            indexOffset: indexOffset);
+
+        indexOffset += drawCall.ElementCount;
+    }
+```
+
+</Step>
+
+<Step title="Dispose GPU resources">
+
+```csharp
+public void Dispose()
+{
+    MyGpuApi.DeleteBuffer(_vbo);
+    MyGpuApi.DeleteBuffer(_ebo);
+    MyGpuApi.DeleteVertexArray(_vao);
+    MyGpuApi.DeleteProgram(_shaderProgram);
+    // Delete any textures you own
+}
+```
+
+</Step>
+
+</Steps>
+
+## Reusing the Built-In GLSL Shaders
+
+If your backend targets OpenGL or WebGL, you can use the shared shaders from `CanvasShaderSource` directly:
+
+```csharp
+using Common; // or embed the strings yourself
+
+string vertSrc  = CanvasShaderSource.VertexShader;
+string fragSrc  = CanvasShaderSource.FragmentShader;
+string blurDown = CanvasShaderSource.BlurDownsampleShader;
+string blurUp   = CanvasShaderSource.BlurUpsampleShader;
+string blurVert = CanvasShaderSource.BlurVertexShader;
+```
+
+All five shaders are GLSL 330 and work on any OpenGL 3.3+ or WebGL 2 context. The blur shaders implement the dual Kawase algorithm; use them if you opt into `SupportsBackdropBlur = true`.
+
+## Key Rules Checklist
+
+<CardGroup cols={2}>
+  <Card title="Always return the same object from CreateTexture" icon="circle-check">
+    Quill stores the returned object and passes it back verbatim. Use a stable wrapper type; never return a value type boxed twice.
+  </Card>
+  <Card title="Upload geometry once per frame" icon="circle-check">
+    `canvas.Vertices` and `canvas.Indices` are valid only for the duration of the `RenderCalls` call. Do not cache them across frames.
+  </Card>
+  <Card title="Respect indexOffset" icon="circle-check">
+    Draw calls share a single index buffer. Keep a running `indexOffset` counter and advance it by `drawCall.ElementCount` after every draw.
+  </Card>
+  <Card title="Use premultiplied alpha blending" icon="circle-check">
+    Set blend factors to `(ONE, ONE_MINUS_SRC_ALPHA)`. Quill outputs premultiplied alpha. Standard `SRC_ALPHA, ONE_MINUS_SRC_ALPHA` blending will produce incorrect results.
+  </Card>
+  <Card title="Bind a white texture when Texture is null" icon="circle-check">
+    A null `DrawCall.Texture` means the draw call has no user texture. Bind a 1×1 white texture so the shader's texture sample returns `vec4(1)` and the brush colour is applied correctly.
+  </Card>
+  <Card title="Disable depth testing" icon="circle-check">
+    Quill uses the painter's algorithm — draw calls are ordered back-to-front. Depth testing will cause shapes to clip through each other unexpectedly.
+  </Card>
+</CardGroup>

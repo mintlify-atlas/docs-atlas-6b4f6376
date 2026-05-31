@@ -1,0 +1,210 @@
+---
+title: "Markdown Rendering in Prowl.Quill Canvas"
+sidebarTitle: "Markdown"
+description: "Parse CommonMark markdown into a QuillMarkdown layout, draw it at any position, and hit-test clickable links — with optional image provider support."
+---
+
+Prowl.Quill can parse a CommonMark markdown string, lay it out into a `QuillMarkdown` display list, and then render it with a single `DrawMarkdown` call. The layout step is done once; after that, drawing is cheap and the same object can be used across many frames. Images referenced in the markdown are loaded through a pluggable `IMarkdownImageProvider` interface, making the system backend-agnostic. Link hit-testing works natively, including scissor-aware clipping for scrollable panels.
+
+## QuillMarkdown struct
+
+```csharp
+public struct QuillMarkdown
+{
+    /// <summary>
+    /// Gets the size of the laid out markdown content.
+    /// </summary>
+    public readonly Float2 Size { get; }
+}
+```
+
+`Size` is the bounding box of the rendered content in **logical units** — the same coordinate space used by every other canvas API. Use it to size background panels, compute scroll extents, or centre the document on screen.
+
+## Image provider
+
+```csharp
+public void SetMarkdownImageProvider(IMarkdownImageProvider provider)
+```
+
+Register an image provider before calling `CreateMarkdown`. The provider is called during layout whenever the markdown contains an `![alt](url)` image reference. Implement the interface to load textures from disk, a resource bundle, or an HTTP cache — whatever your application requires.
+
+```csharp
+public interface IMarkdownImageProvider
+{
+    // Return a backend-specific texture object for the given URL,
+    // or null if the image is not yet available.
+    object? GetImage(string url);
+
+    // Return the logical-unit size of the image, or null if unknown.
+    Float2? GetImageSize(string url);
+}
+```
+
+Register the provider once before creating any markdown objects:
+
+```csharp
+canvas.SetMarkdownImageProvider(new MyImageProvider());
+```
+
+## Creating a layout
+
+```csharp
+public QuillMarkdown CreateMarkdown(string markdown, MarkdownLayoutSettings settings)
+```
+
+Parses the markdown string (CommonMark dialect via Prowl.Scribe), runs the layout engine, and returns a `QuillMarkdown` ready to draw. `MarkdownLayoutSettings` controls fonts, font size, line height, maximum width, and other typographic parameters — these fields come from `Prowl.Scribe` and mirror the fields available on `TextLayoutSettings`.
+
+```csharp
+var mdSettings = new MarkdownLayoutSettings
+{
+    RegularFont = regularFont,
+    BoldFont    = boldFont,
+    ItalicFont  = italicFont,
+    MonoFont    = monoFont,
+    PixelSize   = 16f,
+    MaxWidth    = 600f,
+    LineHeight  = 1.5f,
+};
+
+QuillMarkdown doc = canvas.CreateMarkdown(markdownSource, mdSettings);
+```
+
+<Tip>
+Create your `QuillMarkdown` once — during scene load or when the content changes — and reuse the same object every frame. Parsing and layout are the expensive steps; `DrawMarkdown` only walks the pre-built display list, making it suitable for 60 Hz rendering without measurable overhead.
+</Tip>
+
+## Drawing
+
+```csharp
+public void DrawMarkdown(QuillMarkdown markdown, Float2 position)
+```
+
+Renders the markdown display list at `position` in logical units. The current canvas transform, scissor region, and global alpha all apply, so you can translate, rotate, clip, or fade markdown just like any other canvas content.
+
+```csharp
+canvas.DrawMarkdown(doc, new Float2(padding, padding));
+```
+
+## Link hit-testing
+
+```csharp
+public bool GetMarkdownLinkAt(
+    QuillMarkdown markdown,
+    Float2 renderOffset,
+    Float2 point,
+    bool useScissor,
+    out string href)
+```
+
+Returns `true` and populates `href` when `point` (in logical units) falls inside a hyperlink. `renderOffset` must be the same position you passed to `DrawMarkdown`. When `useScissor` is `true`, the method also tests whether `point` falls inside the active scissor rectangle and returns `false` immediately if it does not — useful for scrollable containers where links outside the visible window should not be clickable.
+
+## Complete usage example
+
+<Steps>
+  <Step title="Implement an image provider">
+    Implement `IMarkdownImageProvider` to load images used in your markdown. Return `null` while an image is loading; the layout engine will leave a blank space and you can regenerate the markdown layout once the image is ready.
+
+    ```csharp
+    public class FileImageProvider : IMarkdownImageProvider
+    {
+        private readonly Dictionary<string, object> _cache = new();
+
+        public object? GetImage(string url)
+        {
+            if (_cache.TryGetValue(url, out var tex)) return tex;
+            // Load texture asynchronously; return null until ready
+            return null;
+        }
+
+        public Float2? GetImageSize(string url) => null; // Let the layout engine query the texture
+    }
+    ```
+  </Step>
+  <Step title="Register the provider and parse markdown">
+    Call `SetMarkdownImageProvider` before `CreateMarkdown`.
+
+    ```csharp
+    canvas.SetMarkdownImageProvider(new FileImageProvider());
+
+    string source = @"
+    # Hello, Prowl.Quill
+
+    This is **bold**, _italic_, and `inline code`.
+
+    - Item one
+    - Item two
+    - Item three
+
+    Visit [the project page](https://github.com/ProwlEngine/Prowl.Quill) for more.
+
+    ![Logo](assets/logo.png)
+    ";
+
+    var settings = new MarkdownLayoutSettings
+    {
+        RegularFont = regularFont,
+        BoldFont    = boldFont,
+        ItalicFont  = italicFont,
+        MonoFont    = monoFont,
+        PixelSize   = 15f,
+        MaxWidth    = 580f,
+        LineHeight  = 1.6f,
+    };
+
+    QuillMarkdown doc = canvas.CreateMarkdown(source, settings);
+    ```
+  </Step>
+  <Step title="Draw each frame">
+    Render the pre-built layout at the desired position. Wrap it in a scissored region for scrolling.
+
+    ```csharp
+    float scrollY   = _scrollOffset;
+    float panelX    = 20f;
+    float panelY    = 60f;
+    float panelW    = 620f;
+    float panelH    = 500f;
+
+    canvas.Scissor(panelX, panelY, panelW, panelH);
+    canvas.DrawMarkdown(doc, new Float2(panelX + 10f, panelY + 10f - scrollY));
+    canvas.ResetScissor();
+    ```
+  </Step>
+  <Step title="Handle link clicks">
+    In your input handler, convert the raw mouse position to logical units and call `GetMarkdownLinkAt`.
+
+    ```csharp
+    Float2 mouse = canvas.PixelToLogical(rawMousePixelPosition);
+
+    if (leftButtonClicked &&
+        canvas.GetMarkdownLinkAt(
+            doc,
+            renderOffset: new Float2(panelX + 10f, panelY + 10f - scrollY),
+            point:        mouse,
+            useScissor:   true,
+            out string href))
+    {
+        System.Diagnostics.Process.Start(new ProcessStartInfo(href) { UseShellExecute = true });
+    }
+    ```
+  </Step>
+</Steps>
+
+## Sizing the content area
+
+Use `QuillMarkdown.Size` to compute scroll bounds or a background panel:
+
+```csharp
+Float2 contentSize = doc.Size;
+
+// Draw a background panel that exactly fits the content
+canvas.SetFillColor(Color32.FromArgb(200, 20, 20, 30));
+canvas.RectFilled(panelX, panelY, contentSize.X + 20f, contentSize.Y + 20f,
+                  Color32.FromArgb(200, 20, 20, 30));
+
+// Clamp scroll so the user cannot scroll past the bottom
+_scrollOffset = Math.Clamp(_scrollOffset, 0f, Math.Max(0f, contentSize.Y - panelH));
+```
+
+<Warning>
+`QuillMarkdown` captures a snapshot of the layout at creation time. If the available width changes (e.g., the window is resized), recreate the object with an updated `MaxWidth` in `MarkdownLayoutSettings`. Similarly, recreate it when the markdown source itself changes.
+</Warning>

@@ -1,0 +1,519 @@
+---
+title: "Canvas Drawing Methods — Prowl.Quill API Reference"
+sidebarTitle: "Drawing"
+description: "Complete drawing API: path construction, shape primitives, image rendering, text layout, rich text with animation tags, and markdown rendering for Prowl.Quill."
+---
+
+Prowl.Quill separates drawing into two broad categories: the **path API**, which constructs geometry procedurally and then fills or strokes it in a separate step, and **direct primitive methods**, which emit pre-optimised geometry for common shapes in a single call. For text and images, dedicated methods handle coordinate scaling, atlas management, and HiDPI automatically.
+
+---
+
+## Path API
+
+The path API mirrors the HTML5 Canvas 2D specification. You build a path from sub-paths composed of lines, arcs, and curves, then render the accumulated geometry in a single `Fill()`, `Stroke()`, or `FillAndStroke()` call.
+
+### `BeginPath`
+
+```csharp
+public void BeginPath()
+```
+
+Clears all existing sub-paths and starts a fresh path. Always call this before building a new shape with the path API.
+
+### `MoveTo`
+
+```csharp
+public void MoveTo(float x, float y)
+```
+
+Starts a new sub-path at `(x, y)` without drawing. This "lifts the pen" — subsequent `LineTo` calls draw from this new origin.
+
+### `LineTo`
+
+```csharp
+public void LineTo(float x, float y)
+```
+
+Adds a straight line segment from the current point to `(x, y)`. If no current point exists, this behaves as `MoveTo`.
+
+### `ClosePath`
+
+```csharp
+public void ClosePath()
+```
+
+Closes the current sub-path by drawing a straight line back to the first point of the sub-path. Has no effect if the sub-path contains fewer than two points.
+
+### `SetSolidity`
+
+```csharp
+public void SetSolidity(WindingMode solidity)
+```
+
+Sets the winding rule used by `FillComplex` and `FillComplexAA` to determine which regions of self-intersecting paths are considered "inside".
+
+| `WindingMode` | Description |
+|---|---|
+| `OddEven` | A point is inside if a ray from it crosses an odd number of path edges (even-odd rule). |
+| `NonZero` | A point is inside if the winding number of the path around it is non-zero. |
+
+### `Arc`
+
+```csharp
+public void Arc(
+    float x, float y, float radius,
+    float startAngle, float endAngle,
+    bool counterclockwise = false)
+```
+
+Appends a circular arc centred at `(x, y)` with the given `radius`. Angles are in **radians**. By default the arc sweeps clockwise from `startAngle` to `endAngle`; pass `counterclockwise: true` to reverse.
+
+### `ArcTo`
+
+```csharp
+public void ArcTo(float x1, float y1, float x2, float y2, float radius)
+```
+
+Adds an arc tangent to the line from the current point to `(x1, y1)` and from `(x1, y1)` to `(x2, y2)`, with the given `radius`. Matches the HTML5 `arcTo` specification exactly. Useful for rounded corners on arbitrary polygons.
+
+### `EllipticalArcTo`
+
+```csharp
+public void EllipticalArcTo(
+    float rx, float ry,
+    float xAxisRotation,
+    bool largeArcFlag, bool sweepFlag,
+    float x, float y)
+```
+
+Appends an SVG-style elliptical arc from the current point to `(x, y)`. `rx`/`ry` are the x and y radii; `xAxisRotation` is the x-axis tilt in degrees; `largeArcFlag` selects the larger of the two possible arcs; `sweepFlag` controls clockwise (`true`) vs counter-clockwise direction.
+
+### `BezierCurveTo`
+
+```csharp
+public void BezierCurveTo(
+    float cp1x, float cp1y,
+    float cp2x, float cp2y,
+    float x, float y)
+```
+
+Adds a cubic Bézier curve from the current point to `(x, y)`, controlled by `(cp1x, cp1y)` and `(cp2x, cp2y)`. Subdivision depth is governed by `SetTessellationTolerance`.
+
+### `QuadraticCurveTo`
+
+```csharp
+public void QuadraticCurveTo(float cpx, float cpy, float x, float y)
+```
+
+Adds a quadratic Bézier curve from the current point to `(x, y)` with control point `(cpx, cpy)`. Internally converted to a cubic Bézier.
+
+### Rendering the Path
+
+```csharp
+public void Fill()          // fan-based fill; best for convex shapes
+public void Stroke()        // anti-aliased polyline stroke
+public void FillAndStroke() // fill then stroke in one call
+public void FillComplex()   // tessellated fill; handles concave/self-intersecting paths
+public void FillComplexAA() // FillComplex + a matching thin stroke for smooth edges
+```
+
+`Fill()` uses a fast fan-triangulation and is ideal for convex shapes. `FillComplex()` runs LibTess2 tessellation and correctly handles concave shapes, holes, and self-intersections — at the cost of a slightly higher CPU overhead.
+
+```csharp
+// Draw a star with correct even-odd fill
+canvas.SetFillColor(Color32.Gold);
+canvas.SetSolidity(WindingMode.OddEven);
+canvas.BeginPath();
+for (int i = 0; i < 5; i++)
+{
+    float outerAngle = -MathF.PI / 2 + i * 2 * MathF.PI / 5;
+    float innerAngle = outerAngle + MathF.PI / 5;
+    float ox = 100 + 60 * MathF.Cos(outerAngle);
+    float oy = 100 + 60 * MathF.Sin(outerAngle);
+    float ix = 100 + 25 * MathF.Cos(innerAngle);
+    float iy = 100 + 25 * MathF.Sin(innerAngle);
+    if (i == 0) canvas.MoveTo(ox, oy); else canvas.LineTo(ox, oy);
+    canvas.LineTo(ix, iy);
+}
+canvas.ClosePath();
+canvas.FillComplex();
+```
+
+---
+
+## Shape Paths
+
+These methods build complete, closed path geometry in a single call. After calling them, use `Fill()`, `Stroke()`, `FillComplex()`, etc. to render.
+
+### `Rect`
+
+```csharp
+public void Rect(float x, float y, float width, float height)
+```
+
+Creates a closed rectangular path with its top-left corner at `(x, y)`.
+
+### `RoundedRect`
+
+```csharp
+// Uniform corner radius
+public void RoundedRect(float x, float y, float width, float height, float radius)
+
+// Individual corner radii
+public void RoundedRect(
+    float x, float y, float width, float height,
+    float tlRadii, float trRadii, float brRadii, float blRadii)
+```
+
+Creates a closed rounded-rectangle path. Radii are clamped to `min(width, height) / 2` to prevent corner overlap.
+
+### `Circle`
+
+```csharp
+public void Circle(float x, float y, float radius, int segments = -1)
+```
+
+Creates a closed circular path centred at `(x, y)`. When `segments` is `-1` the count is computed automatically from `radius` and `SetRoundingMinDistance`.
+
+### `Ellipse`
+
+```csharp
+public void Ellipse(float x, float y, float rx, float ry, int segments = -1)
+```
+
+Creates a closed elliptical path centred at `(x, y)` with x-radius `rx` and y-radius `ry`.
+
+### `Pie`
+
+```csharp
+public void Pie(
+    float x, float y, float radius,
+    float startAngle, float endAngle,
+    int segments = -1)
+```
+
+Creates a closed pie-sector path (a circle sector from centre to arc). Angles are in radians.
+
+---
+
+## Filled Primitives
+
+These methods emit hardware-accelerated geometry directly, bypassing the path API entirely. They respect the current transform, scissor region, global alpha, and active brush — but do **not** read from or modify the current path.
+
+For solid shapes they are significantly faster than the equivalent path operations because they use shader-based anti-aliasing rather than geometry-based AA and avoid the overhead of path tessellation.
+
+### `RectFilled`
+
+```csharp
+public void RectFilled(float x, float y, float width, float height, Color32 color)
+```
+
+Draws a filled rectangle. The rectangle is automatically expanded by half a pixel on each side so the shader-based AA feather sits outside the requested bounds.
+
+```csharp
+canvas.RectFilled(10, 10, 200, 80, Color32.FromArgb(255, 30, 144, 255));
+```
+
+### `RoundedRectFilled`
+
+```csharp
+// Uniform corner radius
+public void RoundedRectFilled(
+    float x, float y, float width, float height,
+    float radius, Color32 color)
+
+// Per-corner radii
+public void RoundedRectFilled(
+    float x, float y, float width, float height,
+    float tlRadii, float trRadii, float brRadii, float blRadii,
+    Color32 color)
+```
+
+Draws a filled rounded rectangle. Corner counts scale automatically with radius size.
+
+```csharp
+// Card with distinct top and bottom radii
+canvas.RoundedRectFilled(20, 20, 300, 160,
+    tlRadii: 16, trRadii: 16, brRadii: 4, blRadii: 4,
+    color: Color32.White);
+```
+
+### `CircleFilled`
+
+```csharp
+public void CircleFilled(
+    float x, float y, float radius,
+    Color32 color,
+    int segments = -1)
+```
+
+Draws a filled circle. Segment count is computed automatically when `segments` is `-1`.
+
+### `PieFilled`
+
+```csharp
+public void PieFilled(
+    float x, float y, float radius,
+    float startAngle, float endAngle,
+    Color32 color,
+    int segments = -1)
+```
+
+Draws a filled pie sector. The centroid is calculated for correct fan triangulation.
+
+```csharp
+// Draw a clock hand indicator at 90°
+canvas.PieFilled(200, 200, 80,
+    startAngle: -0.2f, endAngle: MathF.PI / 2 + 0.2f,
+    color: Color32.FromArgb(200, 0, 120, 255));
+```
+
+---
+
+## Images
+
+### `DrawImage` (sized)
+
+```csharp
+public void DrawImage(
+    object texture,
+    float x, float y, float width, float height,
+    Color32? tint = null)
+```
+
+Draws a texture stretched to the specified rectangle. `tint` multiplies the texture's colour; pass `null` for white (no tint). The call respects the current transform, scissor region, and global alpha.
+
+<ParamField path="texture" type="object" required>
+  A backend-specific texture object returned by `ICanvasRenderer.CreateTexture`.
+</ParamField>
+<ParamField path="x, y" type="float">Top-left corner in logical units.</ParamField>
+<ParamField path="width, height" type="float">Desired display size in logical units.</ParamField>
+<ParamField path="tint" type="Color32?">Optional tint. Defaults to white (no tint).</ParamField>
+
+### `DrawImage` (native size)
+
+```csharp
+public void DrawImage(object texture, float x, float y, Color32? tint = null)
+```
+
+Draws a texture at its native pixel size in logical units. The canvas queries the renderer for the texture's dimensions via `ICanvasRenderer.GetTextureSize`.
+
+```csharp
+canvas.DrawImage(iconTexture, 8, 8);
+canvas.DrawImage(splashTexture, 0, 0, 1280, 720,
+    tint: Color32.FromArgb(200, 255, 255, 255));
+```
+
+---
+
+## Text
+
+Text is rasterised at `pixelSize × FramebufferScale` internally for HiDPI crispness; all coordinates and size values you pass are in logical units.
+
+### `DrawText`
+
+```csharp
+// Simple overload
+public void DrawText(
+    string text, float x, float y,
+    Color32 color,
+    float pixelSize, FontFile font,
+    float letterSpacing = 0f,
+    Float2? origin = null)
+
+// Layout settings overload
+public void DrawText(
+    string text, float x, float y,
+    Color32 color,
+    TextLayoutSettings settings,
+    Float2? origin = null)
+```
+
+Draws a string at `(x, y)`. `origin` is a normalised anchor: `(0,0)` aligns the top-left of the text to the position; `(0.5f, 0.5f)` centres it.
+
+```csharp
+canvas.DrawText("Hello, Quill!", 400, 300,
+    color: Color32.White,
+    pixelSize: 24f,
+    font: myFont,
+    origin: new Float2(0.5f, 0.5f)); // centred on (400, 300)
+```
+
+### `MeasureText`
+
+```csharp
+// Simple overload
+public Float2 MeasureText(
+    string text, float pixelSize, FontFile font,
+    float letterSpacing = 0f)
+
+// Settings overload
+public Float2 MeasureText(string text, TextLayoutSettings settings)
+```
+
+Returns the bounding box of `text` in logical units without drawing anything. Use this to compute layout positions before drawing.
+
+### `CreateLayout`
+
+```csharp
+public TextLayout CreateLayout(string text, TextLayoutSettings settings)
+```
+
+Pre-computes a full text layout (line-breaking, glyph positions) and returns a reusable `TextLayout` object. The layout is in pixel space; use `PixelToLogical` to convert cursor positions back to logical units if needed.
+
+### `DrawLayout`
+
+```csharp
+public void DrawLayout(
+    TextLayout layout,
+    float x, float y,
+    Color32 color,
+    Float2? origin = null)
+```
+
+Renders a previously created `TextLayout` at `(x, y)`. Creating the layout once and drawing it many times is more efficient than calling `DrawText` repeatedly for the same string.
+
+```csharp
+var layout = canvas.CreateLayout(longParagraph, new TextLayoutSettings
+{
+    PixelSize = 16f,
+    Font = bodyFont,
+    MaxWidth = 400f,
+    WrapMode = WrapMode.Word
+});
+
+// Later, each frame:
+canvas.DrawLayout(layout, 20, 60, Color32.Black);
+```
+
+### `AddFallbackFont`
+
+```csharp
+public void AddFallbackFont(FontFile font)
+```
+
+Registers a font to use for glyphs missing from the primary font. Subsequent text drawing calls will automatically fall back to this font for any unsupported characters.
+
+### `EnumerateSystemFonts`
+
+```csharp
+public IEnumerable<FontFile> EnumerateSystemFonts()
+```
+
+Returns all fonts available on the host operating system. Useful for building font pickers or loading a system UI font.
+
+---
+
+## Rich Text
+
+Rich text extends plain text with inline tags for colour, size, font, and animated effects (wave, shake, rainbow, typewriter, etc.). The API mirrors the plain-text API: create a layout once, draw it every frame.
+
+### `CreateRichText`
+
+```csharp
+public QuillRichText CreateRichText(string source, RichTextLayoutSettings settings)
+```
+
+Parses `source` — a string containing inline markup tags — and lays it out for animated rendering. The returned `QuillRichText` is reusable across frames and contains a `Size` property (in logical units) for layout purposes. All dimensional fields in `settings` are in logical units and are scaled internally for HiDPI.
+
+### `DrawRichText`
+
+```csharp
+public void DrawRichText(
+    QuillRichText text,
+    Float2 position,
+    double currentTime,
+    Float2? origin = null)
+```
+
+Draws the rich text at `position`. `currentTime` is the application time in seconds and drives all animations; the first draw after creation anchors the animation start time.
+
+```csharp
+var richText = canvas.CreateRichText(
+    "<wave>Hello</wave> <color=#FF5500>Quill</color>!",
+    new RichTextLayoutSettings { PixelSize = 32f, RegularFont = sansFont });
+
+// Every frame:
+canvas.DrawRichText(richText, new Float2(100, 100), gameTime.TotalSeconds);
+```
+
+### `MeasureRichText`
+
+```csharp
+public Float2 MeasureRichText(string source, RichTextLayoutSettings settings)
+```
+
+Convenience method that creates a layout and returns its size in logical units without drawing. Equivalent to `CreateRichText(source, settings).Size`. If you also need to draw, prefer `CreateRichText` and cache the result.
+
+### `GetRichTextLinkAt`
+
+```csharp
+public bool GetRichTextLinkAt(
+    QuillRichText text,
+    Float2 renderOffset,
+    Float2 point,
+    bool useScissor,
+    out string href)
+```
+
+Hit-tests `point` (in logical units) against all `<link>` spans in `text`. `renderOffset` must match the position passed to the corresponding `DrawRichText` call. Returns `true` and sets `href` when the point falls over a link. If `useScissor` is `true`, returns `false` for points outside the active scissor region.
+
+---
+
+## Markdown
+
+The markdown API parses a CommonMark-compatible document, lays it out using the Scribe text engine, and renders it as styled, clickable content. Images can be loaded via a custom `IMarkdownImageProvider`.
+
+### `SetMarkdownImageProvider`
+
+```csharp
+public void SetMarkdownImageProvider(IMarkdownImageProvider provider)
+```
+
+Registers a provider used to load image textures referenced in markdown `![alt](url)` syntax. Must be set before calling `CreateMarkdown` if the document contains images.
+
+### `CreateMarkdown`
+
+```csharp
+public QuillMarkdown CreateMarkdown(string markdown, MarkdownLayoutSettings settings)
+```
+
+Parses and lays out the markdown string. The returned `QuillMarkdown` struct contains a `Size` property and is reusable across frames. Re-create it when the source text or settings change.
+
+### `DrawMarkdown`
+
+```csharp
+public void DrawMarkdown(QuillMarkdown markdown, Float2 position)
+```
+
+Renders a parsed `QuillMarkdown` document at `position` in logical units.
+
+```csharp
+var md = canvas.CreateMarkdown(readmeText, new MarkdownLayoutSettings
+{
+    MaxWidth = 600f,
+    BaseFont = bodyFont,
+    BasePixelSize = 15f
+});
+
+// Every frame:
+canvas.DrawMarkdown(md, new Float2(20, 20));
+```
+
+### `GetMarkdownLinkAt`
+
+```csharp
+public bool GetMarkdownLinkAt(
+    QuillMarkdown markdown,
+    Float2 renderOffset,
+    Float2 point,
+    bool useScissor,
+    out string href)
+```
+
+Hit-tests `point` against all hyperlinks in the markdown document. Returns `true` and sets `href` to the link URL when the point is over a link. `renderOffset` must match the position passed to `DrawMarkdown`. Pass `useScissor: true` to discard points outside the active scissor rectangle.
+
+```csharp
+if (canvas.GetMarkdownLinkAt(md, new Float2(20, 20), mousePos, useScissor: true, out string url))
+    OpenUrl(url);
+```

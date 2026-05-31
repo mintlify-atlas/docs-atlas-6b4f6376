@@ -1,0 +1,346 @@
+---
+title: "OpenTK Backend for Prowl.Quill Vector Graphics"
+sidebarTitle: "OpenTK"
+description: "Integrate Prowl.Quill with OpenTK using OpenGL 3.3 Core. Covers NuGet setup, CanvasRenderer initialization, the per-frame loop, GLSL shaders, and backdrop blur."
+---
+
+The OpenTK backend is the reference implementation for Prowl.Quill and the most fully-featured of all the provided samples. It targets OpenGL 3.3 Core Profile through the `OpenTK` NuGet package, implements the full dual Kawase backdrop blur pipeline, and demonstrates every major `ICanvasRenderer` contract — texture creation, geometry upload via VAO/VBO/EBO, and per-draw-call uniform binding. If you are building a desktop application with .NET and want a battle-tested starting point, this is the backend to copy and adapt.
+
+## Required Packages
+
+Add the following NuGet packages to your project:
+
+```bash
+dotnet add package OpenTK
+```
+
+The sample also uses `Prowl.Quill`, `Prowl.Scribe`, and `Prowl.Vector`, which are available from the same NuGet source as Quill itself.
+
+## Project Setup
+
+The sample creates a `GameWindow` subclass (`OpenTKWindow`) and a separate `CanvasRenderer` that holds all OpenGL state. The entry point requests OpenGL 3.3 Core:
+
+```csharp
+var nativeWindowSettings = new NativeWindowSettings {
+    ClientSize = new(1280, 720),
+    Title = "OpenTK Quill Example",
+    WindowBorder = WindowBorder.Resizable,
+    API = ContextAPI.OpenGL,
+    Profile = ContextProfile.Core,
+    APIVersion = new Version(3, 3)
+};
+
+using (var window = new OpenTKWindow(GameWindowSettings.Default, nativeWindowSettings))
+{
+    window.Run();
+}
+```
+
+## Implementing `ICanvasRenderer`
+
+`CanvasRenderer` implements `ICanvasRenderer` and declares `SupportsBackdropBlur = true`, meaning Quill will call the dual Kawase blur pipeline for any shape with a backdrop blur fill:
+
+```csharp
+public class CanvasRenderer : ICanvasRenderer
+{
+    public static string STROKE_FRAGMENT_SHADER => CanvasShaderSource.FragmentShader;
+    private static string DEFAULT_VERTEX_SHADER => CanvasShaderSource.VertexShader;
+
+    private int _shaderProgram;
+    private int _vertexArrayObject;
+    private int _vertexBufferObject;
+    private int _elementBufferObject;
+
+    public bool SupportsBackdropBlur => true;
+
+    // ...
+}
+```
+
+## Initialization
+
+Call `Initialize` once after the OpenGL context is current (inside `OnLoad`). It compiles the GLSL shaders, creates the VAO/VBO/EBO, and sets the initial projection matrix:
+
+```csharp
+protected override void OnLoad()
+{
+    base.OnLoad();
+
+    _whiteTexture = TextureTK.LoadFromFile("Textures/white.png");
+    _demoTexture  = TextureTK.LoadFromFile("Textures/wall.png");
+
+    GL.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+
+    _renderer = new CanvasRenderer();
+    _renderer.Initialize(ClientSize.X, ClientSize.Y, _whiteTexture);
+
+    _canvas = new Canvas(_renderer, new FontAtlasSettings());
+}
+```
+
+`Initialize` sets up the shader program and retrieves all uniform locations up front:
+
+```csharp
+public void Initialize(int width, int height, TextureTK defaultTexture)
+{
+    InitializeShaders();
+
+    _vertexArrayObject   = GL.GenVertexArray();
+    _vertexBufferObject  = GL.GenBuffer();
+    _elementBufferObject = GL.GenBuffer();
+
+    // Backdrop blur objects
+    _blurVao = GL.GenVertexArray();
+    _blurFbo = GL.GenFramebuffer();
+
+    _defaultTexture = defaultTexture;
+    UpdateProjection(width, height);
+}
+```
+
+When the window is resized, update the orthographic projection:
+
+```csharp
+protected override void OnResize(ResizeEventArgs e)
+{
+    base.OnResize(e);
+    GL.Viewport(0, 0, ClientSize.X, ClientSize.Y);
+    _renderer.UpdateProjection(ClientSize.X, ClientSize.Y);
+}
+```
+
+## The GLSL Shaders
+
+Both the vertex and fragment shaders are stored in `CanvasShaderSource` (shared across OpenTK and Silk.NET). The vertex shader outputs `fragPos` as the raw screen-space XY position, which the fragment shader uses for scissoring and brush gradient evaluation:
+
+```glsl
+// Vertex shader (CanvasShaderSource.VertexShader)
+#version 330
+uniform mat4 projection;
+
+layout(location = 0) in vec2 aPosition;
+layout(location = 1) in vec2 aTexCoord;
+layout(location = 2) in vec4 aColor;
+
+out vec2 fragTexCoord;
+out vec4 fragColor;
+out vec2 fragPos;
+
+void main()
+{
+    fragTexCoord = aTexCoord;
+    fragColor    = aColor;
+    fragPos      = aPosition;
+    gl_Position  = projection * vec4(aPosition, 0.0, 1.0);
+}
+```
+
+The fragment shader handles solid fills, linear/radial/box brush gradients, texture sampling, per-pixel anti-aliasing via `fwidth`, scissor masking, and the optional backdrop blur composite:
+
+```glsl
+// Fragment shader key uniforms (CanvasShaderSource.FragmentShader)
+uniform sampler2D texture0;
+uniform mat4      scissorMat;
+uniform vec2      scissorExt;
+
+uniform mat4  brushMat;
+uniform int   brushType;    // 0=none, 1=linear, 2=radial, 3=box
+uniform vec4  brushColor1;
+uniform vec4  brushColor2;
+uniform vec4  brushParams;
+uniform vec2  brushParams2;
+
+uniform mat4  brushTextureMat;
+uniform float dpiScale;
+
+// Backdrop blur
+uniform sampler2D backdropTexture;
+uniform vec2      viewportSize;
+uniform float     backdropBlurAmount;
+```
+
+Shaders are compiled and linked inside `InitializeShaders()`:
+
+```csharp
+private void InitializeShaders()
+{
+    _shaderProgram = GL.CreateProgram();
+
+    int vertexShader = GL.CreateShader(ShaderType.VertexShader);
+    GL.ShaderSource(vertexShader, DEFAULT_VERTEX_SHADER);
+    GL.CompileShader(vertexShader);
+
+    int fragmentShader = GL.CreateShader(ShaderType.FragmentShader);
+    GL.ShaderSource(fragmentShader, STROKE_FRAGMENT_SHADER);
+    GL.CompileShader(fragmentShader);
+
+    GL.AttachShader(_shaderProgram, vertexShader);
+    GL.AttachShader(_shaderProgram, fragmentShader);
+    GL.LinkProgram(_shaderProgram);
+
+    GL.DeleteShader(vertexShader);
+    GL.DeleteShader(fragmentShader);
+
+    _projectionLocation    = GL.GetUniformLocation(_shaderProgram, "projection");
+    _textureSamplerLocation = GL.GetUniformLocation(_shaderProgram, "texture0");
+    _scissorMatLoc         = GL.GetUniformLocation(_shaderProgram, "scissorMat");
+    _scissorExtLoc         = GL.GetUniformLocation(_shaderProgram, "scissorExt");
+    // ... brush and blur uniform locations cached here
+}
+```
+
+## Per-Frame Loop
+
+The render loop follows the canonical Quill pattern — begin frame, draw, render:
+
+```csharp
+protected override void OnRenderFrame(FrameEventArgs args)
+{
+    base.OnRenderFrame(args);
+
+    // 1. Begin a new canvas frame (clears previous geometry)
+    float dpiScale = (float)FramebufferSize.X / ClientSize.X;
+    _canvas.BeginFrame(ClientSize.X, ClientSize.Y, dpiScale);
+
+    // 2. Issue drawing commands via the Canvas API
+    _demos[_currentDemoIndex].RenderFrame((float)args.Time, _offset, _zoom, _rotation);
+
+    // 3. Flush the canvas — triggers RenderCalls on the backend
+    GL.Clear(ClearBufferMask.ColorBufferBit);
+    _canvas.Render();
+
+    SwapBuffers();
+}
+```
+
+## Texture Creation
+
+The `ICanvasRenderer` texture methods wrap an internal `TextureTK` helper. Quill calls these when it needs to allocate or update the glyph atlas or user-provided images:
+
+```csharp
+public object CreateTexture(uint width, uint height)
+{
+    return TextureTK.CreateNew(width, height);
+}
+
+public Int2 GetTextureSize(object texture)
+{
+    if (texture is not TextureTK tkTexture)
+        throw new ArgumentException("Invalid texture type");
+    return new Int2((int)tkTexture.Width, (int)tkTexture.Height);
+}
+
+public void SetTextureData(object texture, IntRect bounds, byte[] data)
+{
+    if (texture is not TextureTK tkTexture)
+        throw new ArgumentException("Invalid texture type");
+    tkTexture.SetData(bounds, data);
+}
+```
+
+## `RenderCalls` — Geometry Submission
+
+`RenderCalls` is where all the OpenGL draw calls happen. Vertices and indices are uploaded as streaming buffers each frame, then each `DrawCall` is dispatched individually so scissor and brush uniforms can change between shapes:
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    if (drawCalls.Count == 0) return;
+
+    GL.Disable(EnableCap.DepthTest);
+    GL.Enable(EnableCap.Blend);
+    GL.BlendFunc(BlendingFactor.One, BlendingFactor.OneMinusSrcAlpha);
+
+    GL.UseProgram(_shaderProgram);
+    GL.UniformMatrix4(_projectionLocation, false, ref _projection);
+    GL.BindVertexArray(_vertexArrayObject);
+
+    // Upload vertex data (20 bytes per vertex)
+    GL.BindBuffer(BufferTarget.ArrayBuffer, _vertexBufferObject);
+    GL.BufferData(BufferTarget.ArrayBuffer,
+        canvas.Vertices.Count * Vertex.SizeInBytes,
+        canvas.Vertices.ToArray(),
+        BufferUsageHint.StreamDraw);
+
+    // Position (location 0): vec2 at offset 0
+    GL.EnableVertexAttribArray(0);
+    GL.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, stride, 0);
+
+    // TexCoord (location 1): vec2 at offset 8
+    GL.EnableVertexAttribArray(1);
+    GL.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, stride, 8);
+
+    // Color (location 2): vec4 ubyte normalized at offset 16
+    GL.EnableVertexAttribArray(2);
+    GL.VertexAttribPointer(2, 4, VertexAttribPointerType.UnsignedByte, true, stride, 16);
+
+    // Upload index data
+    GL.BindBuffer(BufferTarget.ElementArrayBuffer, _elementBufferObject);
+    GL.BufferData(BufferTarget.ElementArrayBuffer,
+        canvas.Indices.Count * sizeof(uint),
+        canvas.Indices.ToArray(),
+        BufferUsageHint.StreamDraw);
+
+    int indexOffset = 0;
+    foreach (var drawCall in drawCalls)
+    {
+        // Optional: capture & blur framebuffer for frosted-glass shapes
+        if (drawCall.Brush.BackdropBlur > 0f)
+            RenderBackdropBlur((float)drawCall.Brush.BackdropBlur);
+
+        (drawCall.Texture as TextureTK ?? _defaultTexture).Use(TextureUnit.Texture0);
+
+        // Set per-draw-call uniforms (scissor, brush, DPI scale)
+        GL.Uniform1(_dpiScaleLoc, (float)canvas.FramebufferScale);
+        drawCall.GetScissor(out var scissor, out var extent);
+        // ... bind scissorMat, brushMat, brushType, colors, params ...
+
+        GL.DrawElements(PrimitiveType.Triangles,
+            drawCall.ElementCount,
+            DrawElementsType.UnsignedInt,
+            indexOffset * sizeof(uint));
+
+        indexOffset += drawCall.ElementCount;
+    }
+
+    GL.BindVertexArray(0);
+}
+```
+
+## Backdrop Blur
+
+The OpenTK backend supports `SupportsBackdropBlur = true` by implementing a dual Kawase pyramid. When a draw call has `Brush.BackdropBlur > 0`, the renderer blits the current framebuffer into a half-resolution texture, runs a configurable number of downsample and upsample passes, then binds the blurred result on texture unit 3 for the canvas shader to composite:
+
+```csharp
+// Dual Kawase blur shaders compiled at init time
+_blurDownProgram = BuildBlurProgram(CanvasShaderSource.BlurDownsampleShader);
+_blurUpProgram   = BuildBlurProgram(CanvasShaderSource.BlurUpsampleShader);
+```
+
+<Tip>
+  The blur radius is mapped to a number of pyramid iterations automatically. Larger radii use more passes and wider sample offsets, keeping the visual spread continuous even as the pass count steps up.
+</Tip>
+
+## Cleanup
+
+Release all OpenGL objects when the window is closed:
+
+```csharp
+protected override void OnUnload()
+{
+    _demoTexture.Dispose();
+    _whiteTexture.Dispose();
+    _renderer.Cleanup();
+    base.OnUnload();
+}
+
+public void Dispose()
+{
+    GL.DeleteBuffer(_vertexBufferObject);
+    GL.DeleteBuffer(_elementBufferObject);
+    GL.DeleteVertexArray(_vertexArrayObject);
+    GL.DeleteProgram(_shaderProgram);
+    DeleteBlurObjects();
+    _defaultTexture?.Dispose();
+}
+```

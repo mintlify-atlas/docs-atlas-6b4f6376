@@ -1,0 +1,254 @@
+---
+title: "Drawing Hardware-Accelerated Shapes in Prowl.Quill"
+sidebarTitle: "Shapes"
+description: "Draw filled rectangles, circles, pies, and rounded rectangles using Quill's hardware-accelerated shader-based primitives or the path-based shape helpers."
+---
+
+Prowl.Quill offers two distinct layers for drawing shapes: **shader-based filled primitives** that bypass the path pipeline entirely for maximum throughput, and **path-based shape helpers** that construct a reusable closed path you can later fill, stroke, or combine with other sub-paths. Choosing the right layer matters — the shader variants are significantly faster for static or frequently redrawn shapes, while the path helpers give you composability and access to the full stroke-style system.
+
+<Note>
+  Shader-based filled primitives (`RectFilled`, `CircleFilled`, `RoundedRectFilled`, `PieFilled`) emit geometry directly and do **not** touch the current path state. They are the fastest way to draw opaque, solid-colored shapes. Use the path-based equivalents (`Rect`, `Circle`, `RoundedRect`, `Pie`, `Ellipse`) when you need to stroke the shape, combine sub-paths, or apply complex fills.
+</Note>
+
+## Coordinate System
+
+All coordinates passed to the canvas are in **logical units**. The canvas multiplies them internally by `FramebufferScale` before emitting pixel-space vertices, so your layout code stays HiDPI-agnostic. Sizes and positions never need to change for Retina or high-DPI displays.
+
+---
+
+<Tabs>
+  <Tab title="Filled (Shader-Based)">
+
+    ### `RectFilled`
+
+    Draws a hardware-accelerated filled rectangle. Anti-aliasing is performed in the shader via UV coordinates — no path tessellation required.
+
+    ```csharp
+    void RectFilled(float x, float y, float width, float height, Color32 color)
+    ```
+
+    | Parameter | Description |
+    |-----------|-------------|
+    | `x`, `y` | Top-left corner in logical units |
+    | `width`, `height` | Size in logical units (must be positive) |
+    | `color` | Fill color including alpha |
+
+    ```csharp
+    // Solid red panel
+    canvas.RectFilled(10, 10, 200, 120, Color32.FromArgb(255, 220, 60, 60));
+
+    // Semi-transparent overlay
+    canvas.RectFilled(0, 0, canvas.Width, canvas.Height, Color32.FromArgb(128, 0, 0, 0));
+    ```
+
+    ---
+
+    ### `RoundedRectFilled`
+
+    Draws a hardware-accelerated filled rectangle with rounded corners. Two overloads are available: a uniform-radius form and a per-corner form.
+
+    ```csharp
+    // Uniform radius on all four corners
+    void RoundedRectFilled(float x, float y, float width, float height,
+                           float radius, Color32 color)
+
+    // Independent radius per corner
+    void RoundedRectFilled(float x, float y, float width, float height,
+                           float tlRadii, float trRadii, float brRadii, float blRadii,
+                           Color32 color)
+    ```
+
+    Radii are automatically clamped to half the smaller dimension so corners never overlap.
+
+    ```csharp
+    // Card with uniform 12 px corners
+    canvas.RoundedRectFilled(20, 20, 240, 140, 12, Color32.FromArgb(255, 40, 44, 52));
+
+    // Pill button — only left and right pairs are fully rounded
+    canvas.RoundedRectFilled(
+        50, 60, 160, 40,
+        tlRadii: 20, trRadii: 20,
+        brRadii: 20, blRadii: 20,
+        Color32.FromArgb(255, 80, 140, 255));
+
+    // Asymmetric card — only top corners rounded (bottom flush)
+    canvas.RoundedRectFilled(
+        100, 100, 200, 120,
+        tlRadii: 16, trRadii: 16,
+        brRadii: 0,  blRadii: 0,
+        Color32.FromArgb(255, 60, 60, 80));
+    ```
+
+    ---
+
+    ### `CircleFilled`
+
+    Draws a hardware-accelerated filled circle. When `segments` is `-1` (default) the segment count is derived automatically from the circle's circumference and `RoundingMinDistance` so small circles are efficient and large circles stay smooth.
+
+    ```csharp
+    void CircleFilled(float x, float y, float radius, Color32 color, int segments = -1)
+    ```
+
+    ```csharp
+    // Avatar background circle
+    canvas.CircleFilled(64, 64, 48, Color32.FromArgb(255, 100, 180, 255));
+
+    // Explicit 6-sided hexagon approximation
+    canvas.CircleFilled(200, 100, 30, Color32.FromArgb(200, 255, 200, 80), segments: 6);
+    ```
+
+    ---
+
+    ### `PieFilled`
+
+    Draws a hardware-accelerated filled pie sector (circle slice). Angles are in **radians**, measured clockwise from the positive X axis.
+
+    ```csharp
+    void PieFilled(float x, float y, float radius, float startAngle, float endAngle,
+                   Color32 color, int segments = -1)
+    ```
+
+    ```csharp
+    // Progress indicator: 75 % fill
+    float progress = 0.75f;
+    canvas.PieFilled(
+        x: 120, y: 120, radius: 50,
+        startAngle: -MathF.PI / 2f,          // 12 o'clock
+        endAngle:   -MathF.PI / 2f + MathF.PI * 2f * progress,
+        Color32.FromArgb(255, 80, 200, 120));
+
+    // Quarter wedge (north-east)
+    canvas.PieFilled(200, 200, 60, 0, MathF.PI / 2f, Color32.FromArgb(200, 255, 140, 40));
+    ```
+
+  </Tab>
+
+  <Tab title="Path-Based">
+
+    Path-based shape helpers call `BeginPath()` internally, build the geometry using `MoveTo` / `LineTo` / `Arc`, then leave the path ready for you to `Fill()`, `Stroke()`, or `FillAndStroke()`. Use them when you need stroke styling, gradient fills, or want to clip the shape.
+
+    ---
+
+    ### `Rect`
+
+    Creates a closed rectangular path. **Does not fill or stroke** — you must call `Fill()` / `Stroke()` afterward.
+
+    ```csharp
+    void Rect(float x, float y, float width, float height)
+    ```
+
+    ```csharp
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(2f);
+    canvas.Rect(10, 10, 180, 80);
+    canvas.Stroke();
+    ```
+
+    ---
+
+    ### `RoundedRect`
+
+    Creates a closed rounded-rectangle path using arc segments at each corner.
+
+    ```csharp
+    void RoundedRect(float x, float y, float width, float height, float radius)
+    ```
+
+    ```csharp
+    canvas.SetFillColor(Color32.FromArgb(180, 100, 100, 255));
+    canvas.RoundedRect(20, 20, 160, 90, 16);
+    canvas.Fill();
+    ```
+
+    ---
+
+    ### `Circle`
+
+    Creates a closed circular path. Segment count is auto-derived from the circumference unless overridden.
+
+    ```csharp
+    void Circle(float x, float y, float radius, int segments = -1)
+    ```
+
+    ```csharp
+    // Stroke-only ring
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 200, 80));
+    canvas.SetStrokeWidth(3f);
+    canvas.Circle(100, 100, 45);
+    canvas.Stroke();
+    ```
+
+    ---
+
+    ### `Ellipse`
+
+    Creates a closed elliptical path with independent horizontal (`rx`) and vertical (`ry`) radii.
+
+    ```csharp
+    void Ellipse(float x, float y, float rx, float ry, int segments = -1)
+    ```
+
+    ```csharp
+    canvas.SetFillColor(Color32.FromArgb(200, 80, 200, 160));
+    canvas.Ellipse(150, 100, 80, 40);
+    canvas.Fill();
+    ```
+
+    ---
+
+    ### `Pie`
+
+    Creates a closed pie-sector path (center + arc + closing line back to center).
+
+    ```csharp
+    void Pie(float x, float y, float radius, float startAngle, float endAngle,
+             int segments = -1)
+    ```
+
+    ```csharp
+    canvas.SetFillColor(Color32.FromArgb(220, 255, 100, 100));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(1.5f);
+    canvas.Pie(200, 200, 60, 0, MathF.PI);
+    canvas.FillAndStroke();
+    ```
+
+  </Tab>
+</Tabs>
+
+---
+
+## Combining Fill and Stroke
+
+Both the path API and the shader primitives integrate with the canvas state. To draw a shape with both a fill and an outline, use the path helpers plus `FillAndStroke()`:
+
+```csharp
+canvas.SetFillColor(Color32.FromArgb(180, 60, 120, 220));
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+canvas.SetStrokeWidth(2f);
+
+canvas.RoundedRect(40, 40, 200, 120, 14);
+canvas.FillAndStroke();
+```
+
+## Applying a Gradient to a Shape
+
+Set a brush before calling `Fill()` and the gradient overrides the flat fill color:
+
+```csharp
+// Radial gradient: light blue center → dark purple edge
+canvas.SetRadialBrush(
+    centerX: 100, centerY: 100,
+    innerRadius: 10, outerRadius: 60,
+    innerColor: Color32.FromArgb(255, 173, 216, 230),
+    outerColor: Color32.FromArgb(255, 90, 50, 140));
+
+canvas.Circle(100, 100, 60);
+canvas.Fill();
+
+canvas.ClearBrush(); // Revert to solid fill
+```
+
+<Tip>
+  After you are done with a gradient or texture brush, always call `ClearBrush()` (or `RestoreState()`) so subsequent draw calls are not accidentally tinted.
+</Tip>

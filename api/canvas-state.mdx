@@ -1,0 +1,427 @@
+---
+title: "Canvas State Management — Prowl.Quill API Reference"
+sidebarTitle: "State"
+description: "Full reference for Canvas state: save/restore, fill and stroke style, dash patterns, scissor clipping, gradient brushes, backdrop blur, and custom shaders."
+---
+
+Every drawing operation in Prowl.Quill reads from a mutable **draw state** object. The state bundles fill color, stroke style, active brush, scissor rectangle, and transform into a single unit that can be saved and restored atomically. Understanding state management is key to writing correct, efficient rendering code: the canvas batches draw calls together whenever the state hash is identical, so minimising unnecessary state changes directly reduces draw call count.
+
+---
+
+## Save and Restore
+
+The state stack lets you apply temporary changes — a transform, a clip rectangle, a gradient brush — and then revert cleanly without manually tracking every property you touched.
+
+### `SaveState`
+
+```csharp
+public void SaveState()
+```
+
+Pushes a snapshot of the current state (transform, stroke, fill, scissor, brush, miter limit, tessellation tolerance, and rounding distance) onto an internal stack.
+
+### `RestoreState`
+
+```csharp
+public void RestoreState()
+```
+
+Pops the most recently saved state from the stack and restores it. Does nothing if the stack is empty.
+
+### `ResetState`
+
+```csharp
+public void ResetState()
+```
+
+Resets **all** state properties to their defaults without touching the saved-state stack. Equivalent to starting fresh without a `BeginFrame`.
+
+```csharp
+// Typical save/restore pattern
+canvas.SaveState();
+canvas.SetFillColor(Color32.Red);
+canvas.TransformBy(Transform2D.CreateRotate(0.5f));
+canvas.CircleFilled(100, 100, 40, Color32.Red);
+canvas.RestoreState(); // color and transform are restored
+```
+
+**Default state values:**
+
+| Property | Default |
+|---|---|
+| Stroke color | Black (`#000000FF`) |
+| Fill color | Black (`#000000FF`) |
+| Stroke width | `1.0` |
+| Stroke scale | `1.0` |
+| Joint style | `Bevel` |
+| Start/end cap | `Butt` |
+| Miter limit | `4.0` |
+| Tessellation tolerance | `0.5` |
+| Rounding min distance | `3.0` |
+| Winding mode | `OddEven` |
+| Scissor | Disabled |
+| Brush type | `None` (solid color) |
+
+---
+
+## Fill
+
+### `SetFillColor`
+
+```csharp
+public void SetFillColor(Color32 color)
+```
+
+Sets the solid fill color used by `Fill()`, `FillComplex()`, `FillComplexAA()`, and all filled primitive methods when no gradient brush is active.
+
+### `SetGlobalAlpha`
+
+```csharp
+public void SetGlobalAlpha(float alpha)
+```
+
+Applies a global opacity multiplier (0–1) to every vertex written after this call. This is multiplicative with any per-vertex alpha already in the color.
+
+```csharp
+canvas.SetGlobalAlpha(0.5f); // all subsequent draws are 50% transparent
+canvas.RectFilled(0, 0, 200, 100, Color32.Blue);
+canvas.SetGlobalAlpha(1.0f); // restore full opacity
+```
+
+---
+
+## Stroke
+
+### `SetStrokeColor`
+
+```csharp
+public void SetStrokeColor(Color32 color)
+```
+
+Sets the color used for `Stroke()` and `FillAndStroke()`.
+
+### `SetStrokeWidth`
+
+```csharp
+public void SetStrokeWidth(float width = 2f)
+```
+
+Sets the stroke width in logical units.
+
+### `SetStrokeScale`
+
+```csharp
+public void SetStrokeScale(float scale)
+```
+
+Applies an additional scale factor to the stroke width. The effective pixel width is `(strokeWidth × strokeScale) × FramebufferScale`.
+
+### `SetStrokeJoint`
+
+```csharp
+public void SetStrokeJoint(JointStyle joint)
+```
+
+Controls how corners between path segments are joined.
+
+| `JointStyle` | Description |
+|---|---|
+| `Bevel` | Flat edge connecting the outer corners (default). |
+| `Miter` | Sharp extension of outer edges until they meet. Falls back to bevel when the miter length exceeds the miter limit. |
+| `Round` | Circular arc connecting the outer edges. |
+
+### `SetStrokeCap`
+
+```csharp
+public void SetStrokeCap(EndCapStyle cap)
+```
+
+Sets the same cap style for both the start and end of open paths.
+
+### `SetStrokeStartCap` / `SetStrokeEndCap`
+
+```csharp
+public void SetStrokeStartCap(EndCapStyle cap)
+public void SetStrokeEndCap(EndCapStyle cap)
+```
+
+Sets the cap style for the start or end of open paths independently.
+
+| `EndCapStyle` | Description |
+|---|---|
+| `Butt` | No cap; stroke ends exactly at the endpoint (default). |
+| `Square` | Square cap extending by half the stroke width beyond the endpoint. |
+| `Round` | Semicircular cap with radius equal to half the stroke width. |
+| `Bevel` | Triangular beveled cap. |
+
+### `SetMiterLimit`
+
+```csharp
+public void SetMiterLimit(float limit = 4)
+```
+
+When `JointStyle.Miter` is active, joints whose miter length exceeds `limit × strokeWidth` fall back to bevel. The default of `4` matches the SVG specification.
+
+### `SetTessellationTolerance`
+
+```csharp
+public void SetTessellationTolerance(float tolerance = 0.5f)
+```
+
+Controls how finely Bézier curves and arcs are approximated. Lower values produce smoother curves with more triangles; higher values are faster but may look faceted at large sizes.
+
+### `SetRoundingMinDistance`
+
+```csharp
+public void SetRoundingMinDistance(float distance = 3)
+```
+
+Minimum distance in logical units between consecutive points when approximating curves and arcs. Increasing this value reduces vertex count for very large radii.
+
+---
+
+## Dash Patterns
+
+### `SetStrokeDash`
+
+```csharp
+public void SetStrokeDash(List<float> pattern, float offset = 0.0f)
+```
+
+Applies a dash pattern to all subsequent `Stroke()` calls. The pattern is a flat list of alternating dash and gap lengths in logical units: `[dash1, gap1, dash2, gap2, ...]`. If the list has an odd number of elements it is duplicated and concatenated to make it even, matching SVG behaviour.
+
+<ParamField path="pattern" type="List<float>" required>
+  Alternating dash and gap lengths. Pass `null` or an empty list for a solid line.
+</ParamField>
+
+<ParamField path="offset" type="float" default="0.0">
+  Phase offset into the dash pattern at path start, in logical units.
+</ParamField>
+
+```csharp
+// 10-unit dash, 5-unit gap, starting 3 units into the pattern
+canvas.SetStrokeDash(new List<float> { 10f, 5f }, offset: 3f);
+canvas.BeginPath();
+canvas.MoveTo(0, 50);
+canvas.LineTo(400, 50);
+canvas.Stroke();
+```
+
+### `ClearStrokeDash`
+
+```csharp
+public void ClearStrokeDash()
+```
+
+Reverts the stroke to a solid line and resets the dash offset to zero.
+
+---
+
+## Scissor Clipping
+
+The scissor rectangle clips all geometry to an axis-aligned rectangular region. Unlike many APIs, Prowl.Quill's scissor is **transform-aware**: it is stored in the coordinate space of the current transform at the time `Scissor()` is called.
+
+### `Scissor`
+
+```csharp
+public void Scissor(float x, float y, float w, float h)
+```
+
+Sets the scissor rectangle in logical units relative to the current transform. Any geometry outside the rectangle is discarded at the shader level.
+
+### `IntersectScissor`
+
+```csharp
+public void IntersectScissor(float x, float y, float w, float h)
+```
+
+Computes the intersection of the existing scissor rectangle with the new rectangle and uses the result as the new scissor. If no scissor is currently active, this behaves like `Scissor()`.
+
+### `ResetScissor`
+
+```csharp
+public void ResetScissor()
+```
+
+Disables clipping by invalidating the scissor region.
+
+```csharp
+canvas.Scissor(50, 50, 300, 200);
+canvas.CircleFilled(100, 100, 200, Color32.Teal); // clipped to 50,50–350,250
+canvas.ResetScissor();
+```
+
+---
+
+## Gradient Brushes
+
+Brushes override solid fill color with gradient or pattern fills. When a brush is active, its colors replace `SetFillColor` for all filled shapes.
+
+### `SetLinearBrush`
+
+```csharp
+public void SetLinearBrush(
+    float x1, float y1,
+    float x2, float y2,
+    Color32 color1, Color32 color2)
+```
+
+Sets a linear gradient from `(x1, y1)` to `(x2, y2)`. Colors are premultiplied-alpha encoded internally.
+
+<ParamField path="x1, y1" type="float">Start point of the gradient in logical units.</ParamField>
+<ParamField path="x2, y2" type="float">End point of the gradient in logical units.</ParamField>
+<ParamField path="color1" type="Color32">Color at the start point.</ParamField>
+<ParamField path="color2" type="Color32">Color at the end point.</ParamField>
+
+```csharp
+canvas.SetLinearBrush(0, 0, 200, 0,
+    Color32.FromArgb(255, 255, 80, 0),
+    Color32.FromArgb(255, 80, 0, 255));
+canvas.RoundedRectFilled(0, 0, 200, 60, 12, Color32.White);
+canvas.ClearBrush();
+```
+
+### `SetRadialBrush`
+
+```csharp
+public void SetRadialBrush(
+    float centerX, float centerY,
+    float innerRadius, float outerRadius,
+    Color32 innerColor, Color32 outerColor)
+```
+
+Sets a radial gradient centred at `(centerX, centerY)`. The `innerColor` fills from the origin to `innerRadius`; the gradient feathers to `outerColor` by `outerRadius`.
+
+<ParamField path="centerX, centerY" type="float">Center of the gradient in logical units.</ParamField>
+<ParamField path="innerRadius" type="float">Radius at which the inner color ends.</ParamField>
+<ParamField path="outerRadius" type="float">Radius at which the outer color begins.</ParamField>
+<ParamField path="innerColor" type="Color32">Color at the center.</ParamField>
+<ParamField path="outerColor" type="Color32">Color at the outer edge.</ParamField>
+
+### `SetBoxBrush`
+
+```csharp
+public void SetBoxBrush(
+    float centerX, float centerY,
+    float width, float height,
+    float radi, float feather,
+    Color32 innerColor, Color32 outerColor)
+```
+
+Sets a box gradient: `innerColor` fills a rounded rectangle of size `width × height` centred at `(centerX, centerY)` with corner radius `radi`; the transition to `outerColor` is spread over `feather` logical units.
+
+<ParamField path="radi" type="float">Corner radius of the inner box.</ParamField>
+<ParamField path="feather" type="float">Softness of the box edge in logical units. Larger values produce a more blurred transition.</ParamField>
+
+### `ClearBrush`
+
+```csharp
+public void ClearBrush()
+```
+
+Removes any active gradient brush, reverting fills to the solid `SetFillColor` color.
+
+---
+
+## Texture Brush
+
+A texture brush maps an image onto filled shapes using world-space UV coordinates.
+
+### `SetBrushTexture`
+
+```csharp
+public void SetBrushTexture(object? texture)
+```
+
+Applies a texture to all subsequent fills. When `texture` is non-null and no explicit `SetBrushTextureTransform` has been called, a default transform is computed so that one logical unit maps to one texel.
+
+### `SetBrushTextureTransform`
+
+```csharp
+public void SetBrushTextureTransform(Transform2D transform)
+```
+
+Controls how world-space coordinates map to texture UV space. The supplied transform is composed with the current canvas transform so the texture follows any active rotation or scale.
+
+### `ClearBrushTexture`
+
+```csharp
+public void ClearBrushTexture()
+```
+
+Removes the active texture and resets the texture transform to identity.
+
+---
+
+## Backdrop Blur
+
+Backdrop blur turns any filled shape into a frosted-glass panel by blending the shape's fill over a blurred copy of the framebuffer content behind it.
+
+### `SetBackdropBlur`
+
+```csharp
+public void SetBackdropBlur(float radius)
+```
+
+Enables backdrop blur for subsequent filled shapes. `radius` is the blur radius in **physical pixels**. A translucent fill tints the blurred background; a fully opaque fill completely obscures it. Backends that do not support backdrop blur draw the fill normally.
+
+```csharp
+canvas.SetBackdropBlur(12f);
+canvas.SetFillColor(Color32.FromArgb(120, 255, 255, 255)); // semi-transparent white
+canvas.RoundedRectFilled(20, 20, 400, 200, 16, Color32.White);
+canvas.ClearBackdropBlur();
+```
+
+### `ClearBackdropBlur`
+
+```csharp
+public void ClearBackdropBlur()
+```
+
+Disables backdrop blur (`radius` set to `0`).
+
+---
+
+## Custom Shaders
+
+Custom shaders allow backend-specific shader programs to be bound for individual draw calls. When a shader is active, the default Prowl.Quill uniforms are **not** set — the application is responsible for supplying all required uniforms.
+
+### `SetCustomShader`
+
+```csharp
+public void SetCustomShader(object? shader)
+```
+
+Binds a backend-specific shader object. Pass `null` to revert to the default shader.
+
+### `SetShaderUniform`
+
+```csharp
+public void SetShaderUniform(string name, object value)
+```
+
+Sets a single named uniform. Supported value types: `float`, `int`, `Float2`, `Float3`, `Float4`, `Float4x4`.
+
+### `SetShaderUniforms`
+
+```csharp
+public void SetShaderUniforms(Dictionary<string, object> uniforms)
+```
+
+Sets multiple uniforms in a single call.
+
+### `ClearCustomShader`
+
+```csharp
+public void ClearCustomShader()
+```
+
+Removes the custom shader and clears all associated uniforms.
+
+```csharp
+canvas.SetCustomShader(myGlowShader);
+canvas.SetShaderUniform("u_GlowRadius", 8.0f);
+canvas.SetShaderUniform("u_GlowColor", new Float4(1f, 0.5f, 0f, 1f));
+canvas.CircleFilled(200, 200, 60, Color32.White);
+canvas.ClearCustomShader();
+```

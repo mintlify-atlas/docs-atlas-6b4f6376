@@ -1,0 +1,90 @@
+---
+title: "Prowl.Quill Rendering Backends Overview"
+sidebarTitle: "Backends Overview"
+description: "Choose a rendering backend for Prowl.Quill. Every backend implements ICanvasRenderer, giving you hardware-accelerated, anti-aliased 2D vector graphics."
+---
+
+Prowl.Quill is designed to be renderer-agnostic. All rendering is funnelled through a single interface — `ICanvasRenderer` — which you implement once for your target graphics API. The library ships with six ready-made sample backends covering OpenTK, Raylib, SFML, Silk.NET, Unity, and WebAssembly. Whether you are building a desktop game, a browser app, or a Unity project, there is a backend you can drop in or adapt to your needs. Every backend follows the same three-step frame loop: call `canvas.BeginFrame(...)`, issue drawing commands, then call `canvas.Render()`.
+
+## The `ICanvasRenderer` Interface
+
+Every backend in this section is a concrete implementation of `ICanvasRenderer`:
+
+```csharp
+public interface ICanvasRenderer : IDisposable
+{
+    object CreateTexture(uint width, uint height);
+    Int2 GetTextureSize(object texture);
+    void SetTextureData(object texture, IntRect bounds, byte[] data);
+    void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls);
+    bool SupportsBackdropBlur => false;
+}
+```
+
+`SupportsBackdropBlur` defaults to `false`. Backends that implement the dual Kawase blur pipeline override this to `true`, enabling frosted-glass / backdrop-blur fills. When a backend returns `false`, backdrop-blur draw calls degrade gracefully to flat tinted fills so your code continues to run unmodified.
+
+## Backend Comparison
+
+| Backend | NuGet Package | Platform | Notes |
+|---|---|---|---|
+| **OpenTK** | `OpenTK` | Windows, macOS, Linux | Full OpenGL 3.3 backend; supports BackdropBlur |
+| **Raylib** | `Raylib-cs` | Windows, macOS, Linux | Wraps rlgl; supports BackdropBlur |
+| **SFML** | `SFML.Net` | Windows, macOS, Linux | Uses SFML shader pipeline; supports BackdropBlur |
+| **Silk.NET** | `Silk.NET.OpenGL`, `Silk.NET.Windowing` | Windows, macOS, Linux | OpenGL via Silk.NET bindings; supports BackdropBlur |
+| **Unity** | N/A (DLL import) | Unity Editor & Runtime | Uses Unity Mesh + CommandBuffer; no BackdropBlur |
+| **WebAssembly** | N/A (WASM/Blazor) | Browser (WebGL 2) | Bridges to JS via WebGLInterop; no BackdropBlur |
+
+<Note>
+  BackdropBlur is supported by OpenTK, Raylib, SFML, and Silk.NET backends, all of which implement a dual Kawase downsample/upsample pyramid. When `SupportsBackdropBlur` is `false`, Quill automatically degrades to a flat fill.
+</Note>
+
+## Available Backends
+
+<CardGroup cols={2}>
+  <Card
+    title="OpenTK"
+    icon="square-terminal"
+    href="/backends/opentk"
+  >
+    Full OpenGL 3.3 Core backend using the OpenTK windowing library. The reference implementation, including dual Kawase backdrop blur. Ideal for desktop applications and game tools.
+  </Card>
+  <Card
+    title="Raylib"
+    icon="gamepad"
+    href="/backends/raylib"
+  >
+    Integrates with Raylib's rlgl immediate-mode layer. Minimal setup — one renderer class, one render loop. Great for prototyping and indie game development.
+  </Card>
+  <Card
+    title="SFML"
+    icon="window-maximize"
+    href="/backends/sfml"
+  >
+    Uses SFML.Net's shader and vertex-array pipeline. Familiar to C++ SFML developers porting projects to .NET. Supports backdrop blur via render textures.
+  </Card>
+  <Card
+    title="Silk.NET"
+    icon="layer-group"
+    href="/backends/silknet"
+  >
+    OpenGL 3.3 via Silk.NET bindings. Unopinionated windowing, compatible with Vulkan-next migration paths. Mirrors the OpenTK backend structure closely.
+  </Card>
+  <Card
+    title="Unity"
+    icon="unity"
+    href="/backends/unity"
+  >
+    Renders inside Unity using `Graphics.DrawMeshNow` or a `CommandBuffer`. Requires netstandard2.1 DLL builds of Quill, Scribe, and Vector placed in `Assets/Plugins`.
+  </Card>
+  <Card
+    title="WebAssembly"
+    icon="globe"
+    href="/backends/webassembly"
+  >
+    Runs in the browser via .NET WASM and a thin JavaScript WebGL 2 interop layer. Exports frame callbacks as `[JSExport]` methods and serialises draw calls across the JS boundary.
+  </Card>
+</CardGroup>
+
+## Building a Custom Backend
+
+If none of the provided backends fits your needs, you can implement `ICanvasRenderer` yourself. The interface is deliberately small — four methods and one property — and the [Custom Backend](/backends/custom) guide walks you through a complete skeleton implementation with annotated steps.

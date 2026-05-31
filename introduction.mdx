@@ -1,0 +1,132 @@
+---
+title: "Prowl.Quill: Hardware-Accelerated 2D Vector Graphics"
+sidebarTitle: "Introduction"
+description: "Prowl.Quill is a high-performance, anti-aliased 2D vector graphics library for .NET with an HTML5 Canvas-style API and multi-backend GPU rendering."
+---
+
+Prowl.Quill is a lightweight, hardware-accelerated 2D vector graphics library built for the .NET ecosystem. It exposes a familiar HTML5 Canvas-style API — `BeginPath`, `MoveTo`, `LineTo`, `Fill`, `Stroke`, and friends — while internally driving a GPU render pipeline that produces crisp, anti-aliased output with minimal CPU overhead. Whether you are building a game UI, a data visualization tool, or a general-purpose drawing surface, Quill gives you expressive path-based drawing commands backed by efficient batch rendering, all in under 1,000 lines of executable library code.
+
+## What Makes Quill Different
+
+Most 2D drawing libraries for .NET either rely on the CPU (slow for real-time workloads) or expose a low-level GPU API that is difficult to use correctly. Quill occupies the sweet spot: a **high-level, familiar API** that compiles your drawing commands into batched, GPU-ready geometry and hands it off to a thin backend renderer. You get the ergonomics of a browser Canvas with the throughput of a native OpenGL/Vulkan path.
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Anti-Aliased Rendering" icon="sparkles">
+    All primitives — lines, curves, filled shapes, and text — are rendered with
+    sub-pixel anti-aliasing driven entirely on the GPU. No CPU rasterization step.
+  </Card>
+  <Card title="HTML5 Canvas-Style API" icon="code">
+    `BeginPath`, `MoveTo`, `LineTo`, `BezierCurveTo`, `Arc`, `Fill`, `Stroke` —
+    the API mirrors the browser Canvas 2D specification, so the learning curve is minimal.
+  </Card>
+  <Card title="Efficient Batch Rendering" icon="bolt">
+    Draw calls are accumulated into a single vertex buffer per frame and submitted to the
+    GPU in one pass. Shapes that share the same brush and scissor state are automatically
+    merged into a single draw call.
+  </Card>
+  <Card title="Multi-Backend Portability" icon="layers">
+    Quill ships with ready-to-use backends for OpenTK, Raylib, SFML, and Silk.NET OpenGL.
+    Targeting a new graphics API requires implementing only four methods on `ICanvasRenderer`.
+  </Card>
+  <Card title="Rich Shape Primitives" icon="shapes">
+    Rectangles, rounded rectangles, circles, ellipses, pies, arcs, quadratic and cubic
+    Bézier curves, polylines, and concave filled shapes with configurable winding rules.
+  </Card>
+  <Card title="Gradients & Textures" icon="paintbrush">
+    Linear, radial, and box gradients. Texture mapping with per-draw-call transform.
+    Backdrop blur (dual Kawase, where the backend supports it). Global alpha control.
+  </Card>
+  <Card title="Canvas State Stack" icon="stack">
+    `SaveState` / `RestoreState` preserve stroke color, fill color, transform, scissor
+    region, and all style properties — perfect for composing isolated drawing routines.
+  </Card>
+  <Card title="Transforms & Clipping" icon="crop">
+    Full 2D affine transforms (translate, rotate, scale, skew) via `TransformBy`.
+    Scissor regions that respect the current transform for correctly clipped sub-regions.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+Quill's design separates **what to draw** from **how to draw it** through three collaborating types.
+
+```
+┌─────────────────────────────────────────────┐
+│                  Your Code                  │
+│  canvas.BeginPath(); canvas.Fill(); …       │
+└────────────────────┬────────────────────────┘
+                     │ drawing commands
+                     ▼
+┌─────────────────────────────────────────────┐
+│               Prowl.Quill.Canvas            │
+│  Path tessellation · State stack · Batching │
+│  Vertices[] + Indices[] + DrawCalls[]       │
+└────────────────────┬────────────────────────┘
+                     │ ICanvasRenderer.RenderCalls()
+                     ▼
+┌─────────────────────────────────────────────┐
+│             ICanvasRenderer backend         │
+│  OpenTK · Raylib · SFML · Silk.NET · yours  │
+└─────────────────────────────────────────────┘
+```
+
+### Canvas
+
+`Prowl.Quill.Canvas` is the central class your application interacts with. It maintains a **state stack** (transforms, stroke/fill styles, scissor) and processes drawing commands into tessellated geometry stored in `Vertices`, `Indices`, and `DrawCalls` lists. At the end of each frame you call `canvas.Render()`, which hands those lists to the registered backend.
+
+### ICanvasRenderer
+
+`ICanvasRenderer` is a small interface with four methods your backend must implement:
+
+| Method | Purpose |
+|--------|---------|
+| `CreateTexture(uint width, uint height)` | Allocate a GPU texture for the font atlas or user textures |
+| `GetTextureSize(object texture)` | Return the pixel dimensions of a texture |
+| `SetTextureData(object texture, IntRect bounds, byte[] data)` | Upload RGBA pixel data to a texture region |
+| `RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)` | Submit the accumulated draw calls to the GPU |
+
+An optional `SupportsBackdropBlur` property (default `false`) advertises whether the backend implements frame-buffer capture and blurring for the backdrop-blur effect.
+
+### Backends
+
+Quill ships sample backends alongside the library. Each backend is a self-contained class that implements `ICanvasRenderer` for a specific graphics API:
+
+| Backend | Graphics API |
+|---------|-------------|
+| OpenTK | OpenGL 3.3 Core |
+| Raylib | Raylib |
+| SFML | SFML Graphics |
+| Silk.NET | OpenGL (via Silk.NET) |
+
+### Text Rendering (Prowl.Scribe)
+
+Text rendering is delegated to **Prowl.Scribe**, Quill's companion font-layout library. Scribe handles TrueType font loading, glyph rasterization, atlas packing, and rich text layout. The `Canvas.Text` property exposes the `TextRenderer`, and convenience methods like `DrawText`, `MeasureText`, `CreateLayout`, and `DrawLayout` are available directly on `Canvas`.
+
+### SVG Support
+
+Quill includes an SVG parser that translates SVG path data into native Canvas drawing commands, enabling you to load and render vector artwork without external dependencies.
+
+### Canvas3D
+
+The Prowl ecosystem also provides `Canvas3D`, which extends Quill's 2D drawing model into 3D space — letting you place anti-aliased vector shapes on arbitrary planes in a 3D scene.
+
+---
+
+## Explore Further
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Go from zero to a working canvas drawing in minutes with a step-by-step guide.
+  </Card>
+  <Card title="Canvas Concepts" icon="book-open" href="/concepts/canvas">
+    Deep-dive into the Canvas state stack, path model, and rendering pipeline.
+  </Card>
+  <Card title="Backends Overview" icon="plug" href="/backends/overview">
+    Learn how backends work and how to implement your own `ICanvasRenderer`.
+  </Card>
+  <Card title="Canvas API Reference" icon="brackets-curly" href="/api/canvas">
+    Full reference for every method on `Prowl.Quill.Canvas`.
+  </Card>
+</CardGroup>

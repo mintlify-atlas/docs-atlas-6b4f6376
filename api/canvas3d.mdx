@@ -1,0 +1,402 @@
+---
+title: "Canvas3D — 3D Projection Wrapper for Prowl.Quill"
+sidebarTitle: "Canvas3D"
+description: "Reference for Canvas3D: setting up perspective cameras, projecting 3D paths and primitives to 2D, and drawing wireframe meshes with the Quill canvas."
+---
+
+`Canvas3D` wraps a `Canvas` and adds a full 3D projection pipeline — world, view, and projection matrices — so that 3D coordinates can be projected to the 2D screen and rendered with the same anti-aliased stroke and fill primitives that Prowl.Quill provides. It supports a path API that mirrors the 2D canvas (`MoveTo`, `LineTo`, `ClosePath`, `Stroke`, `Fill`) but accepts `Float3` coordinates, as well as convenience methods for wireframe cubes, spheres, arcs, and Bézier curves in 3D space.
+
+---
+
+## Constructor
+
+```csharp
+public Canvas3D(Canvas canvas, float viewportWidth = 0, float viewportHeight = 0)
+```
+
+Creates a new `Canvas3D` wrapping an existing `Canvas`. All three matrices start
+as the identity matrix. The canvas is not owned by `Canvas3D` — dispose the
+underlying `Canvas` separately when done.
+
+<ParamField path="canvas" type="Canvas">
+  The 2D canvas that receives projected draw calls. Must not be null.
+</ParamField>
+
+<ParamField path="viewportWidth" type="float">
+  Width of the virtual viewport in logical units. Pass `0` (default) to use
+  `canvas.Width` dynamically each frame — useful when the window is resizable.
+</ParamField>
+
+<ParamField path="viewportHeight" type="float">
+  Height of the virtual viewport in logical units. Pass `0` (default) to use
+  `canvas.Height` dynamically.
+</ParamField>
+
+---
+
+## Properties
+
+<ResponseField name="Canvas" type="Canvas">
+  The underlying 2D canvas. Use this to set stroke/fill colours, widths, and any
+  other 2D canvas state before drawing 3D geometry.
+</ResponseField>
+
+<ResponseField name="ViewMatrix" type="Float4x4 (get/set)">
+  The camera view matrix. Setting this property recomputes the combined
+  view-projection matrix (`Projection × View × World`) immediately. Use
+  `SetLookAt` as a convenience helper to construct and apply a look-at view
+  matrix.
+</ResponseField>
+
+<ResponseField name="ProjectionMatrix" type="Float4x4 (get/set)">
+  The projection matrix (perspective or orthographic). Setting this property
+  recomputes the combined matrix. Use `SetPerspectiveProjection` to construct
+  and apply a standard perspective frustum.
+</ResponseField>
+
+<ResponseField name="WorldMatrix" type="Float4x4 (get/set)">
+  The world transform applied to every 3D point before the view and projection
+  transforms. Setting this property recomputes the combined matrix. Use
+  `SetWorldTransform` to compose a TRS (translate–rotate–scale) world matrix.
+</ResponseField>
+
+<ResponseField name="ViewportWidth" type="float (get/set)">
+  Width of the viewport used for NDC-to-screen conversion. Returns
+  `canvas.Width` when the stored value is ≤ 0, making it automatically follow a
+  resizable window. Set explicitly to render into a sub-region of the canvas.
+</ResponseField>
+
+<ResponseField name="ViewportHeight" type="float (get/set)">
+  Height of the viewport used for NDC-to-screen conversion. Returns
+  `canvas.Height` when the stored value is ≤ 0.
+</ResponseField>
+
+---
+
+## Matrix Setup Helpers
+
+### SetPerspectiveProjection
+
+```csharp
+public void SetPerspectiveProjection(float fieldOfView, float aspectRatio,
+                                     float nearPlane, float farPlane)
+```
+
+Builds and applies a standard perspective-projection matrix.
+
+<ParamField path="fieldOfView" type="float">
+  Vertical field-of-view angle **in radians**. A value of `MathF.PI / 4`
+  (45°) is a common starting point.
+</ParamField>
+
+<ParamField path="aspectRatio" type="float">
+  Viewport width divided by height (`ViewportWidth / ViewportHeight`).
+</ParamField>
+
+<ParamField path="nearPlane" type="float">
+  Distance to the near clipping plane. Must be positive. Typical value: `0.1`.
+</ParamField>
+
+<ParamField path="farPlane" type="float">
+  Distance to the far clipping plane. Typical value: `100` to `1000`.
+</ParamField>
+
+---
+
+### SetLookAt
+
+```csharp
+public void SetLookAt(Float3 cameraPosition, Float3 targetPosition, Float3 upVector)
+```
+
+Builds and applies a look-at view matrix that places the camera at
+`cameraPosition`, pointing toward `targetPosition`, with `upVector` defining
+the camera's up direction.
+
+<ParamField path="cameraPosition" type="Float3">Position of the camera in world space.</ParamField>
+<ParamField path="targetPosition" type="Float3">Point in world space the camera looks at.</ParamField>
+<ParamField path="upVector" type="Float3">World-space up direction. Typically `Float3.UnitY`.</ParamField>
+
+---
+
+### SetWorldTransform
+
+```csharp
+public void SetWorldTransform(Float3 position, Quaternion rotation, Float3 scale)
+```
+
+Composes a TRS world matrix from individual components and assigns it to
+`WorldMatrix`. The composition order is `Scale × Rotation × Translation`.
+
+<ParamField path="position" type="Float3">World-space translation.</ParamField>
+<ParamField path="rotation" type="Quaternion">Object rotation. Build with `Quaternion.FromEuler` or similar.</ParamField>
+<ParamField path="scale" type="Float3">Per-axis scale. Use `Float3.One` for no scaling.</ParamField>
+
+---
+
+## Projection Utilities
+
+### Project
+
+```csharp
+public Float2 Project(Float3 point3D)
+```
+
+Projects a single 3D world-space point to 2D screen coordinates using the
+current combined view-projection matrix.
+
+**Returns:** Screen-space `Float2`. Returns `(NaN, NaN)` when the point is
+behind the camera or outside the view frustum — always check `float.IsNaN`
+before using the result.
+
+```csharp
+Float2 screenPt = canvas3D.Project(new Float3(1, 2, 3));
+if (!float.IsNaN(screenPt.X))
+    canvas.CircleFilled(screenPt.X, screenPt.Y, 4, Color32.Red);
+```
+
+---
+
+### IsVisible
+
+```csharp
+public bool IsVisible(Float3 point3D)
+```
+
+Returns `true` if the point is within the view frustum (clip-space W > 0 and
+all NDC coordinates in [-1, 1]).
+
+---
+
+### DrawLine
+
+```csharp
+public void DrawLine(Float3 start, Float3 end, Color color, float width = 1.0f)
+```
+
+Projects two 3D endpoints and draws a single stroked line segment on the
+underlying canvas. Does nothing if either endpoint is invisible.
+
+<ParamField path="start" type="Float3">Start point in world space.</ParamField>
+<ParamField path="end" type="Float3">End point in world space.</ParamField>
+<ParamField path="color" type="Color">Stroke colour.</ParamField>
+<ParamField path="width" type="float">Stroke width in logical units. Default `1.0`.</ParamField>
+
+---
+
+## 3D Path API
+
+`Canvas3D` provides a path API that accumulates 3D points and projects them to
+2D when `Stroke()` or `Fill()` is called. Points that project outside the
+frustum are dropped from the path; the renderer starts a new sub-path segment
+when it encounters the next visible point.
+
+### BeginPath
+
+```csharp
+public void BeginPath()
+```
+
+Clears the accumulated 3D point list and marks the path as open.
+
+---
+
+### MoveTo
+
+```csharp
+public void MoveTo(float x, float y, float z)
+public void MoveTo(Float3 point)
+```
+
+Moves the current path position to the given 3D coordinate without drawing a
+line segment.
+
+---
+
+### LineTo
+
+```csharp
+public void LineTo(float x, float y, float z)
+public void LineTo(Float3 point)
+```
+
+Adds the given 3D coordinate to the current path as a line endpoint.
+
+---
+
+### ClosePath
+
+```csharp
+public void ClosePath()
+```
+
+Closes the current path by appending a copy of the first point at the end of
+the list. When projected and stroked, this creates a closed contour.
+
+---
+
+### Stroke
+
+```csharp
+public void Stroke()
+```
+
+Projects all accumulated 3D points to 2D, feeds the result into the underlying
+`Canvas` path, and calls `Canvas.Stroke()`. Uses the canvas's current stroke
+colour, width, joint, and cap settings. Does nothing if the path contains fewer
+than two points.
+
+---
+
+### Fill
+
+```csharp
+public void Fill()
+```
+
+Projects all accumulated 3D points to 2D and calls `Canvas.Fill()`. Uses the
+canvas's current fill colour and winding mode.
+
+---
+
+## Primitive Drawing Methods
+
+### DrawCubeStroked
+
+```csharp
+public void DrawCubeStroked(Float3 center, float size)
+```
+
+Draws a wireframe cube centred at `center` with equal side lengths of `size`.
+Each of the twelve edges is stroked as a separate path. Uses the current canvas
+stroke colour and width.
+
+<ParamField path="center" type="Float3">Centre of the cube in local (world) space.</ParamField>
+<ParamField path="size" type="float">Total edge length. Half-size `size/2` is applied in each direction.</ParamField>
+
+---
+
+### DrawSphereStroked
+
+```csharp
+public void DrawSphereStroked(Float3 center, float radius, int segments = 16)
+```
+
+Draws a wireframe sphere as a series of longitude rings (vertical circles) and
+latitude rings (horizontal circles). Each ring is a separate stroked path.
+
+<ParamField path="center" type="Float3">Centre of the sphere in world space.</ParamField>
+<ParamField path="radius" type="float">Sphere radius.</ParamField>
+<ParamField path="segments" type="int">Number of segments per ring and number of rings. Default `16`.</ParamField>
+
+---
+
+### Arc
+
+```csharp
+public void Arc(Float3 center, float radius, Float3 normal, Float3 startDir,
+                float angleInRadians, int segments = 16)
+```
+
+Appends a 3D arc to the **current open path**. The arc lies in the plane
+defined by `normal`, starts along `startDir`, and sweeps through
+`angleInRadians`. Call `Stroke()` or `Fill()` after to render it.
+
+<ParamField path="center" type="Float3">Centre point of the arc.</ParamField>
+<ParamField path="radius" type="float">Arc radius.</ParamField>
+<ParamField path="normal" type="Float3">Normal vector of the plane containing the arc. Normalised internally.</ParamField>
+<ParamField path="startDir" type="Float3">Direction from `center` to the arc's first point. Normalised internally.</ParamField>
+<ParamField path="angleInRadians" type="float">Total sweep angle in radians. Use `MathF.PI * 2` for a full circle.</ParamField>
+<ParamField path="segments" type="int">Number of line segments approximating the arc. Default `16`.</ParamField>
+
+---
+
+### BezierCurve
+
+```csharp
+public void BezierCurve(Float3 p0, Float3 p1, Float3 p2, Float3 p3, int segments = 16)
+```
+
+Appends a cubic Bézier curve in 3D space to the current path. Internally
+evaluates the curve at `segments` uniformly spaced parameter values and calls
+`LineTo` for each point. Call `Stroke()` after to render.
+
+<ParamField path="p0" type="Float3">Start point (anchor).</ParamField>
+<ParamField path="p1" type="Float3">First control point.</ParamField>
+<ParamField path="p2" type="Float3">Second control point.</ParamField>
+<ParamField path="p3" type="Float3">End point (anchor).</ParamField>
+<ParamField path="segments" type="int">Number of line segments. Default `16`.</ParamField>
+
+---
+
+## Complete Example: 3D Wireframe Scene
+
+The following example sets up a perspective camera and draws a rotating
+wireframe cube, a wireframe sphere, and a full-circle arc — the same scene used
+in the library's built-in `Demo3D` method.
+
+```csharp
+void RenderScene(Canvas canvas, float elapsedSeconds, float windowWidth, float windowHeight)
+{
+    canvas.BeginFrame(windowWidth, windowHeight, dpiScale: 1f);
+
+    var canvas3D = new Canvas3D(canvas);
+
+    // --- Camera ---
+    float aspect = windowWidth / windowHeight;
+    canvas3D.SetPerspectiveProjection(
+        fieldOfView: MathF.PI / 4f,   // 45°
+        aspectRatio: aspect,
+        nearPlane:   0.1f,
+        farPlane:    100f);
+
+    canvas3D.SetLookAt(
+        cameraPosition: new Float3(0, 0, -10),
+        targetPosition: Float3.Zero,
+        upVector:       Float3.UnitY);
+
+    // --- Animated rotation ---
+    Quaternion rot = Quaternion.FromEuler(
+        elapsedSeconds * 0.5f,
+        elapsedSeconds * 0.3f,
+        0f);
+
+    canvas.SetStrokeWidth(2f);
+
+    // Rotating cube (offset left)
+    canvas.SetStrokeColor(Color32.FromArgb(255, 220, 60, 60));
+    canvas3D.SetWorldTransform(new Float3(-3f, 0, 0), rot, Float3.One);
+    canvas3D.DrawCubeStroked(Float3.Zero, 2f);
+
+    // Rotating sphere (offset right)
+    canvas.SetStrokeColor(Color32.FromArgb(255, 60, 120, 220));
+    canvas3D.SetWorldTransform(new Float3(3f, 0, 0), rot, Float3.One);
+    canvas3D.DrawSphereStroked(Float3.Zero, 1f, 16);
+
+    // Full-circle arc at the origin (filled)
+    canvas3D.SetWorldTransform(Float3.Zero, rot, Float3.One);
+    canvas.SetStrokeWidth(6f);
+    canvas.SetFillColor(Color32.FromArgb(180, 255, 220, 0));
+
+    canvas3D.Arc(
+        center:          Float3.Zero,
+        radius:          2f,
+        normal:          Float3.UnitY,
+        startDir:        Float3.UnitX,
+        angleInRadians:  MathF.PI * 2f,
+        segments:        32);
+
+    canvas3D.Fill();
+
+    canvas.SetStrokeColor(Color32.FromArgb(255, 160, 60, 220));
+    canvas3D.Stroke();
+
+    // --- Project a single point and draw a 2D marker ---
+    Float2 markerScreen = canvas3D.Project(new Float3(0, 1.5f, 0));
+    if (!float.IsNaN(markerScreen.X))
+        canvas.CircleFilled(markerScreen.X, markerScreen.Y, 5,
+                            Color32.FromArgb(255, 255, 80, 0));
+
+    canvas.Render();
+}
+```

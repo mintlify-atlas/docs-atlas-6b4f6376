@@ -1,0 +1,247 @@
+---
+title: "3D Rendering with Canvas3D in Prowl.Quill"
+sidebarTitle: "Canvas 3D"
+description: "Project 3D world-space geometry onto a 2D canvas using Canvas3D — set view, projection, and world matrices, then draw lines, cubes, and custom paths."
+---
+
+`Canvas3D` is a lightweight wrapper around the standard `Canvas` that adds a full perspective-projection pipeline. Instead of thinking in screen pixels, you define 3D scene geometry — vertices, paths, curves — and `Canvas3D` projects them to 2D canvas coordinates automatically. The underlying `Canvas` handles all antialiasing, stroke styles, and fill, so every 2D drawing API you already know continues to work; `Canvas3D` simply replaces the coordinate system.
+
+## Constructor
+
+```csharp
+public Canvas3D(Canvas canvas, float viewportWidth = 0, float viewportHeight = 0)
+```
+
+Pass the existing `Canvas` you render into. The optional `viewportWidth` / `viewportHeight` parameters set the screen-space region used when converting NDC to pixel coordinates. When both are left at `0` (the default), `Canvas3D` automatically reads `canvas.Width` and `canvas.Height` each frame.
+
+```csharp
+var canvas3D = new Canvas3D(canvas);
+```
+
+## Properties
+
+<CardGroup cols={2}>
+  <Card title="Canvas" icon="image">
+    `Canvas Canvas { get; }` — the underlying 2D canvas being wrapped. Use it directly for stroke colours, fill, state save/restore, etc.
+  </Card>
+  <Card title="ViewMatrix" icon="eye">
+    `Float4x4 ViewMatrix { get; set; }` — camera-space transform. Setting it automatically recomputes the combined view-projection matrix.
+  </Card>
+  <Card title="ProjectionMatrix" icon="video">
+    `Float4x4 ProjectionMatrix { get; set; }` — perspective or orthographic projection. Recomputes combined matrix on assignment.
+  </Card>
+  <Card title="WorldMatrix" icon="globe">
+    `Float4x4 WorldMatrix { get; set; }` — object-to-world transform. Setting it recomputes the combined matrix.
+  </Card>
+</CardGroup>
+
+The combined matrix used for projection is:
+
+```
+viewProjectionMatrix = ProjectionMatrix * ViewMatrix * WorldMatrix
+```
+
+### Viewport dimensions
+
+```csharp
+public float ViewportWidth  { get; set; }
+public float ViewportHeight { get; set; }
+```
+
+Both properties fall back to the canvas dimensions when left at `0`. Override them to render into a sub-region of the canvas — for example, a panel inside a UI:
+
+```csharp
+canvas3D.ViewportWidth  = panelWidth;
+canvas3D.ViewportHeight = panelHeight;
+```
+
+## Setting up the camera
+
+### Perspective projection
+
+```csharp
+public void SetPerspectiveProjection(
+    float fieldOfView,
+    float aspectRatio,
+    float nearPlane,
+    float farPlane)
+```
+
+Internally calls `Float4x4.CreatePerspectiveFov` and assigns `ProjectionMatrix`.
+
+### Look-at camera
+
+```csharp
+public void SetLookAt(
+    Float3 cameraPosition,
+    Float3 targetPosition,
+    Float3 upVector)
+```
+
+Builds a view matrix from eye/target/up via `Float4x4.CreateLookAt` and assigns `ViewMatrix`.
+
+### World transform
+
+```csharp
+public void SetWorldTransform(
+    Float3 position,
+    Quaternion rotation,
+    Float3 scale)
+```
+
+Composes `scale → rotation → translation` into `WorldMatrix`:
+
+```csharp
+canvas3D.SetWorldTransform(
+    new Float3(-2f, 1f, 0f),
+    Quaternion.FromEuler(0.5f, 1.0f, 0f),
+    Float3.One * 0.5f);
+```
+
+## Projecting 3D points
+
+```csharp
+public Float2 Project(Float3 point3D)
+```
+
+Transforms `point3D` through the combined view-projection matrix, performs perspective division, and maps to viewport coordinates. Returns `Float2(NaN, NaN)` when the point is behind the camera or outside the view frustum.
+
+```csharp
+public bool IsVisible(Float3 point3D)
+```
+
+Returns `true` only when the point would produce valid screen coordinates.
+
+## 3D path API
+
+`Canvas3D` exposes its own `BeginPath` / `MoveTo` / `LineTo` / `ClosePath` / `Stroke` / `Fill` that accumulate 3D points, project them, and flush to the underlying canvas:
+
+```csharp
+canvas3D.BeginPath();
+canvas3D.MoveTo(new Float3(0f, 0f, 0f));
+canvas3D.LineTo(new Float3(1f, 0f, 0f));
+canvas3D.Stroke();
+```
+
+Points that project to NaN are skipped and restart the segment, so occluded portions of a path are simply omitted.
+
+### Direct line helper
+
+```csharp
+public void DrawLine(Float3 start, Float3 end, Color color, float width = 1.0f)
+```
+
+Projects both endpoints and calls the canvas stroke API in one call. If either endpoint is invisible the line is skipped entirely.
+
+### Primitive helpers
+
+| Method | Description |
+|---|---|
+| `DrawCubeStroked(Float3 center, float size)` | Wireframe cube: 12 edges, 8 projected vertices |
+| `DrawSphereStroked(Float3 center, float radius, int segments = 16)` | Latitude + longitude wireframe rings |
+| `Arc(Float3 center, float radius, Float3 normal, Float3 startDir, float angleInRadians, int segments = 16)` | 3D arc in a plane defined by `normal` |
+| `BezierCurve(Float3 p0, Float3 p1, Float3 p2, Float3 p3, int segments = 16)` | Cubic Bézier through projected line segments |
+
+## Complete setup example
+
+<Steps>
+  <Step title="Create Canvas3D">
+    Wrap your existing canvas with `Canvas3D`. The constructor takes an optional viewport size; leaving it at zero uses the canvas dimensions automatically.
+
+    ```csharp
+    var canvas3D = new Canvas3D(canvas);
+    ```
+  </Step>
+  <Step title="Set projection and camera">
+    Configure the perspective projection and camera position each frame (or whenever the window resizes).
+
+    ```csharp
+    float aspectRatio = canvas.Width / canvas.Height;
+    canvas3D.SetPerspectiveProjection(
+        fieldOfView: MathF.PI / 4f,   // 45 degrees
+        aspectRatio: aspectRatio,
+        nearPlane:   0.1f,
+        farPlane:    100f);
+
+    float time = (float)Environment.TickCount / 1000f;
+    float camX = MathF.Sin(time * 0.2f) * 8f;
+    float camZ = MathF.Cos(time * 0.2f) * 8f;
+
+    canvas3D.SetLookAt(
+        cameraPosition: new Float3(camX, 5f, camZ),
+        targetPosition: Float3.Zero,
+        upVector:       Float3.UnitY);
+    ```
+  </Step>
+  <Step title="Configure the world transform and draw">
+    For each object, set a world transform and then use the 3D path or primitive API. Use the underlying `Canvas` to set stroke colour, width, and fill colour as usual.
+
+    ```csharp
+    // Rotating cube
+    Quaternion rot = Quaternion.FromEuler(time * 0.5f, time * 0.3f, 0f);
+    canvas3D.SetWorldTransform(
+        position: new Float3(-2f, 2f, 0f),
+        rotation: rot,
+        scale:    Float3.One * 0.5f);
+
+    canvas.SetStrokeColor(Color32.FromArgb(255, 220, 100, 100));
+    canvas.SetStrokeWidth(2f);
+    canvas3D.DrawCubeStroked(Float3.Zero, 2f);
+
+    // Rotating sphere
+    canvas3D.SetWorldTransform(new Float3(2f, 2f, 0f), rot, Float3.One * 0.5f);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 100, 220, 100));
+    canvas3D.DrawSphereStroked(Float3.Zero, 1.5f, 10);
+    ```
+  </Step>
+  <Step title="Custom 3D paths">
+    Use `BeginPath` / `MoveTo` / `LineTo` for arbitrary 3D geometry, then call `Stroke` or `Fill`.
+
+    ```csharp
+    // Draw a 3D arc filled with yellow and stroked in purple
+    canvas3D.SetWorldTransform(Float3.Zero, Quaternion.Identity, Float3.One);
+
+    canvas.SetStrokeWidth(6f);
+    canvas.SetFillColor(Color32.FromArgb(255, 255, 255, 0));
+
+    canvas3D.Arc(
+        center:          Float3.Zero,
+        radius:          2f,
+        normal:          new Float3(0f, 1f, 0f),
+        startDir:        new Float3(1f, 0f, 0f),
+        angleInRadians:  MathF.PI * 2f,
+        segments:        32);
+
+    canvas3D.Fill();
+
+    canvas.SetStrokeColor(Color32.FromArgb(255, 150, 0, 200));
+    canvas3D.Stroke();
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Always apply your canvas transform (e.g. `canvas.TransformBy(Transform2D.CreateTranslation(x, y))`) **before** drawing with `Canvas3D`. The 3D projection produces 2D viewport coordinates that are relative to the canvas origin, so the current 2D transform controls where in the window the scene appears.
+</Note>
+
+## Viewport sub-region rendering
+
+To render a 3D scene inside a UI panel, translate to the panel's top-left corner and set the viewport size:
+
+```csharp
+canvas.SaveState();
+canvas.TransformBy(Transform2D.CreateTranslation(panelX, panelY));
+
+canvas3D.ViewportWidth  = panelWidth;
+canvas3D.ViewportHeight = panelHeight;
+
+float aspect = panelWidth / panelHeight;
+canvas3D.SetPerspectiveProjection(MathF.PI / 4f, aspect, 0.1f, 100f);
+canvas3D.SetLookAt(new Float3(0f, 3f, -8f), Float3.Zero, Float3.UnitY);
+
+canvas3D.SetWorldTransform(Float3.Zero, Quaternion.Identity, Float3.One);
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 200, 80));
+canvas3D.DrawCubeStroked(Float3.Zero, 2f);
+
+canvas.RestoreState();
+```

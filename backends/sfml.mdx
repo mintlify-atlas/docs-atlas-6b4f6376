@@ -1,0 +1,288 @@
+---
+title: "SFML Backend for Prowl.Quill Vector Graphics"
+sidebarTitle: "SFML"
+description: "Integrate Prowl.Quill with SFML.Net. Covers NuGet setup, SFMLRenderer initialization, the per-frame loop, shader pipeline, and backdrop blur via RenderTexture."
+---
+
+The SFML backend brings Prowl.Quill into applications built with `SFML.Net`, the .NET binding for the popular Simple and Fast Multimedia Library. It uses SFML's own `Shader`, `VertexArray`, and `RenderWindow` APIs rather than accessing OpenGL directly, which makes it the most idiomatic choice for developers already familiar with the C++ SFML ecosystem. The backdrop blur feature is implemented using SFML `RenderTexture` objects as blur levels and a pair of dual Kawase fragment-only shaders. Because SFML's `Shader.IsAvailable` can return `false` on some platforms or driver configurations, the renderer checks shader availability before compiling and falls back to unshaded rendering gracefully.
+
+## Required Packages
+
+```bash
+dotnet add package SFML.Net
+```
+
+`Prowl.Quill`, `Prowl.Scribe`, and `Prowl.Vector` are also required.
+
+## Project Setup
+
+The sample wraps an SFML `RenderWindow` in a `SFMLWindow` class. The window is created with an explicit OpenGL 3.3 context so SFML shaders can target `#version 130` GLSL:
+
+```csharp
+var contextSettings = new ContextSettings
+{
+    DepthBits         = 24,
+    StencilBits       = 8,
+    AntialiasingLevel = 0,
+    MajorVersion      = 3,
+    MinorVersion      = 3
+};
+
+_window = new RenderWindow(
+    new VideoMode(width, height),
+    title,
+    Styles.Default,
+    contextSettings
+);
+```
+
+## Initialization
+
+`SFMLRenderer.Initialize` compiles the shaders (if available), creates the `VertexArray` reused across every draw call, and sets the orthographic projection:
+
+```csharp
+public void Initialize(int width, int height, TextureSFML defaultTexture)
+{
+    _defaultTexture = defaultTexture.Handle;
+    _vertexArray    = new VertexArray(PrimitiveType.Triangles);
+
+    if (Shader.IsAvailable)
+    {
+        _shader = Shader.FromString(VERTEX_SHADER, null, FRAGMENT_SHADER);
+        _shader.SetUniform("texture0", Shader.CurrentTexture);
+
+        _blurDown = Shader.FromString(null, null, BLUR_DOWN_FS);
+        _blurUp   = Shader.FromString(null, null, BLUR_UP_FS);
+    }
+
+    UpdateProjection(width, height);
+}
+```
+
+The `SFMLWindow` then calls `SetRenderWindow` to give the renderer a reference to the window it should draw into:
+
+```csharp
+_renderer = new SFMLRenderer();
+_renderer.Initialize((int)_window.Size.X, (int)_window.Size.Y, _whiteTexture);
+_renderer.SetRenderWindow(_window);
+
+_canvas = new Canvas(_renderer, new FontAtlasSettings());
+```
+
+When the window is resized, both the SFML view and the renderer projection are updated:
+
+```csharp
+private void OnResize(object sender, SizeEventArgs e)
+{
+    _window.SetView(new View(new FloatRect(0, 0, e.Width, e.Height)));
+    _renderer.UpdateProjection((int)e.Width, (int)e.Height);
+}
+```
+
+`UpdateProjection` reconstructs the orthographic `Mat4` passed to the shader and caches the framebuffer dimensions for backdrop blur:
+
+```csharp
+public void UpdateProjection(int width, int height)
+{
+    _fbWidth  = width;
+    _fbHeight = height;
+    _projection = new View(new FloatRect(0, 0, width, height));
+
+    if (Shader.IsAvailable)
+    {
+        Mat4 projMat = new(
+             2.0f/width,  0,           0, -1,
+             0,          -2.0f/height, 0,  1,
+             0,           0,           1,  0,
+             0,           0,           0,  1
+        );
+        _shader.SetUniform("projection", projMat);
+    }
+}
+```
+
+## Per-Frame Loop
+
+The `SFMLWindow.Run` method drives the main loop. SFML events are dispatched first, then the canvas frame begins, drawing commands are issued, and finally the window is presented:
+
+```csharp
+public void Run()
+{
+    DateTime now = DateTime.UtcNow;
+    while (_window.IsOpen)
+    {
+        _window.DispatchEvents();
+        HandleInput();
+
+        float deltaTime = (float)(DateTime.UtcNow - now).TotalSeconds;
+        now = DateTime.UtcNow;
+
+        // 1. Begin a new canvas frame
+        _canvas.BeginFrame(_window.Size.X, _window.Size.Y);
+
+        // 2. Issue drawing commands
+        _demos[_currentDemoIndex].RenderFrame(deltaTime, _offset, _zoom, _rotation);
+
+        // 3. Flush the canvas
+        _window.Clear(SFML.Graphics.Color.Black);
+        _canvas.Render();
+        _window.Display();
+    }
+}
+```
+
+<Note>
+  Note that `BeginFrame` here is called without a `dpiScale` argument. SFML does not provide a native high-DPI surface scale on all platforms, so the sample omits it. Pass an explicit scale value if your platform reports a device pixel ratio.
+</Note>
+
+## `RenderCalls` — Geometry Submission
+
+Because SFML does not expose indexed drawing, `RenderCalls` reconstructs a flat `VertexArray` for each draw call by walking `canvas.Indices` and fetching the corresponding vertex from `canvas.Vertices`:
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    if (_window == null || drawCalls.Count == 0) return;
+
+    BlendMode premultipliedAlpha = new(
+        BlendMode.Factor.One,
+        BlendMode.Factor.OneMinusSrcAlpha,
+        BlendMode.Equation.Add,
+        BlendMode.Factor.One,
+        BlendMode.Factor.OneMinusSrcAlpha,
+        BlendMode.Equation.Add
+    );
+
+    for (int i = 0; i < drawCalls.Count; i++)
+    {
+        var drawCall = drawCalls[i];
+
+        // Backdrop blur: capture window pixels and blur before drawing this shape
+        if (drawCall.Brush.BackdropBlur > 0f && Shader.IsAvailable)
+        {
+            EnsureBlurTargets(_fbWidth, _fbHeight);
+            _captureTex.Update(_window);
+            RenderBackdropBlur((float)drawCall.Brush.BackdropBlur);
+        }
+
+        Texture texture = (drawCall.Texture as TextureSFML)?.Handle ?? _defaultTexture;
+
+        // Accumulate vertices for this draw call into the VertexArray
+        _vertexArray.Clear();
+        int indexOffset = drawCalls.Take(i).Sum(dc => dc.ElementCount);
+
+        for (int j = 0; j < drawCall.ElementCount; j++)
+        {
+            int idx    = (int)canvas.Indices[indexOffset + j];
+            var vertex = canvas.Vertices[idx];
+
+            _vertexArray.Append(new SFML.Graphics.Vertex(
+                new((float)vertex.Position.X, (float)vertex.Position.Y),
+                new SFML.Graphics.Color(vertex.Color.R, vertex.Color.G, vertex.Color.B, vertex.Color.A),
+                new((float)vertex.UV.X, (float)vertex.UV.Y)
+            ));
+        }
+
+        // Set per-draw-call shader uniforms
+        if (Shader.IsAvailable && _shader != null)
+        {
+            _shader.SetUniform("dpiScale", (float)canvas.FramebufferScale);
+            drawCall.GetScissor(out var scissor, out var extent);
+            _shader.SetUniform("scissorMat", ToMat4(scissor));
+            _shader.SetUniform("scissorExt", new Vec2((float)extent.X, (float)extent.Y));
+            _shader.SetUniform("brushMat",   ToMat4(drawCall.Brush.BrushMatrix));
+            _shader.SetUniform("brushType",  (int)drawCall.Brush.Type);
+            _shader.SetUniform("brushColor1", ToVec4(drawCall.Brush.Color1));
+            _shader.SetUniform("brushColor2", ToVec4(drawCall.Brush.Color2));
+            _shader.SetUniform("brushTextureMat", ToMat4(drawCall.Brush.TextureMatrix));
+        }
+
+        RenderStates states = new(premultipliedAlpha, Transform.Identity, texture, _shader);
+        _window.Draw(_vertexArray, states);
+    }
+}
+```
+
+## Backdrop Blur
+
+The SFML backend captures the current window into a `Texture` then runs dual Kawase passes through `RenderTexture` objects:
+
+```csharp
+private void RenderBackdropBlur(float radius)
+{
+    ComputeBlurParams(radius, out int iterations, out float offset);
+
+    BlurPass(_blurDown, _blurLevels[0], _captureTex, false, offset);
+    for (int i = 0; i < iterations; i++)
+        BlurPass(_blurDown, _blurLevels[i + 1], _blurLevels[i].Texture, true, offset);
+    for (int i = iterations; i > 0; i--)
+        BlurPass(_blurUp, _blurLevels[i - 1], _blurLevels[i].Texture, true, offset);
+}
+
+private void BlurPass(Shader sh, RenderTexture dst, Texture src,
+                      bool srcIsRenderTexture, float offset)
+{
+    var sprite = new Sprite(src);
+    sprite.Scale = new Vector2f(dst.Size.X / (float)src.Size.X,
+                                dst.Size.Y / (float)src.Size.Y);
+    // RenderTexture contents are stored upside down; flip the source rect to present it upright.
+    if (srcIsRenderTexture)
+        sprite.TextureRect = new SFML.Graphics.IntRect(
+            0, (int)src.Size.Y, (int)src.Size.X, -(int)src.Size.Y);
+
+    sh.SetUniform("texture",   Shader.CurrentTexture);
+    sh.SetUniform("halfpixel", new Vec2(0.5f / src.Size.X, 0.5f / src.Size.Y));
+    sh.SetUniform("offset",    offset);
+
+    dst.Clear(new SFML.Graphics.Color(0, 0, 0, 0));
+    dst.Draw(sprite, new RenderStates(BlendMode.None, Transform.Identity, src, sh));
+    dst.Display();
+    sprite.Dispose();
+}
+```
+
+## Texture Methods
+
+```csharp
+public object CreateTexture(uint width, uint height)
+{
+    return TextureSFML.CreateNew(width, height);
+}
+
+public Int2 GetTextureSize(object texture)
+{
+    if (texture is not TextureSFML sfmlTexture)
+        throw new ArgumentException("Invalid texture type");
+    return new Int2((int)sfmlTexture.Width, (int)sfmlTexture.Height);
+}
+
+public void SetTextureData(object texture, IntRect bounds, byte[] data)
+{
+    if (texture is not TextureSFML sfmlTexture)
+        throw new ArgumentException("Invalid texture type");
+    sfmlTexture.SetData(bounds, data);
+}
+```
+
+## Cleanup
+
+```csharp
+public void Dispose()
+{
+    _renderer.Dispose();
+    _whiteTexture.Dispose();
+    _demoTexture.Dispose();
+    _window.Dispose();
+}
+
+// SFMLRenderer.Dispose:
+public void Dispose()
+{
+    _shader?.Dispose();
+    _vertexArray?.Dispose();
+    _blurDown?.Dispose();
+    _blurUp?.Dispose();
+    _captureTex?.Dispose();
+    for (int i = 0; i < MaxBlurLevels; i++) _blurLevels[i]?.Dispose();
+}
+```

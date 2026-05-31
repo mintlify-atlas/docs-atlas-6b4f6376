@@ -1,0 +1,364 @@
+---
+title: "Building and Rendering Vector Paths in Prowl.Quill"
+sidebarTitle: "Paths"
+description: "Use BeginPath, MoveTo, LineTo, Arc, BezierCurveTo and more to construct complex vector shapes, then fill or stroke them with full winding-rule control."
+---
+
+The path API is the heart of Prowl.Quill. A path is an ordered collection of sub-paths, each built from straight lines, circular arcs, and Bézier curves. When your path is complete you choose how to render it — `Fill()` for fast fan-fill, `FillComplex()` for tessellated self-intersecting shapes, `Stroke()` for outlined polylines, or `FillAndStroke()` for both in a single call. The API is intentionally close to the [HTML5 Canvas 2D API](https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D), so the mental model will feel familiar.
+
+## Path Lifecycle
+
+Every path follows the same lifecycle:
+
+<Steps>
+  <Step title="BeginPath()">
+    Clears all previous sub-paths and marks the canvas as ready for new path data.
+  </Step>
+  <Step title="MoveTo / LineTo / curves">
+    Add points, arcs, and curves to build one or more sub-paths.
+  </Step>
+  <Step title="ClosePath() (optional)">
+    Draws a straight line from the current point back to the first point of the current sub-path, closing it.
+  </Step>
+  <Step title="Fill / Stroke / FillAndStroke">
+    Render the accumulated geometry using the current fill and stroke state.
+  </Step>
+</Steps>
+
+---
+
+## Core Path Commands
+
+### `BeginPath()`
+
+Resets all sub-paths. Always call this before starting a new shape unless you intentionally want to add sub-paths to the existing path (for holes or compound shapes).
+
+```csharp
+void BeginPath()
+```
+
+### `MoveTo(x, y)`
+
+Lifts the pen and places it at `(x, y)` without drawing anything. Starts a new sub-path. If called before `BeginPath()`, it implicitly calls `BeginPath()` first.
+
+```csharp
+void MoveTo(float x, float y)
+```
+
+### `LineTo(x, y)`
+
+Draws a straight line from the current position to `(x, y)` and updates the current position. If there is no current position, behaves like `MoveTo`.
+
+```csharp
+void LineTo(float x, float y)
+```
+
+### `ClosePath()`
+
+Connects the current point back to the first point of the current sub-path with a straight line, closing the loop. The current position becomes that first point.
+
+```csharp
+void ClosePath()
+```
+
+---
+
+## Arcs
+
+### `Arc`
+
+Appends a circular arc centered at `(x, y)` with the given `radius` from `startAngle` to `endAngle`, both in **radians**. By default the arc sweeps clockwise; pass `counterclockwise: true` to reverse.
+
+```csharp
+void Arc(float x, float y, float radius, float startAngle, float endAngle,
+         bool counterclockwise = false)
+```
+
+If there is no current point the canvas first does an implicit `MoveTo` to the arc's start position. Otherwise a straight line segment connects the current point to the arc entry.
+
+```csharp
+// Draw a half-circle (bottom hemisphere)
+canvas.BeginPath();
+canvas.Arc(100, 100, 50, 0, MathF.PI, false);
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 200, 80));
+canvas.SetStrokeWidth(3f);
+canvas.Stroke();
+```
+
+---
+
+### `ArcTo`
+
+Draws a circular arc tangent to both the line from the current point to `(x1, y1)` and the line from `(x1, y1)` to `(x2, y2)`. This is the classic *rounded corner* primitive.
+
+```csharp
+void ArcTo(float x1, float y1, float x2, float y2, float radius)
+```
+
+```csharp
+// Rounded top-right corner
+canvas.BeginPath();
+canvas.MoveTo(20, 20);
+canvas.LineTo(180, 20);
+canvas.ArcTo(200, 20, 200, 40, 20);   // Round the corner
+canvas.LineTo(200, 120);
+canvas.SetStrokeColor(Color32.FromArgb(255, 100, 200, 255));
+canvas.SetStrokeWidth(2f);
+canvas.Stroke();
+```
+
+---
+
+### `EllipticalArcTo`
+
+Appends an SVG-style elliptical arc from the current point to `(x_end, y_end)`. This is the `A` command from SVG path data, implementing the full W3C algorithm including radius scaling when radii are too small.
+
+```csharp
+void EllipticalArcTo(float rx, float ry, float xAxisRotationDegrees,
+                     bool largeArcFlag, bool sweepFlag,
+                     float x_end, float y_end)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `rx`, `ry` | X and Y radii of the ellipse |
+| `xAxisRotationDegrees` | Rotation of the ellipse's X axis in degrees |
+| `largeArcFlag` | `true` → choose the larger of the two possible arcs |
+| `sweepFlag` | `true` → arc sweeps in positive-angle (clockwise) direction |
+| `x_end`, `y_end` | End point of the arc |
+
+```csharp
+// Sweeping elliptical arc
+canvas.BeginPath();
+canvas.MoveTo(50, 150);
+canvas.EllipticalArcTo(
+    rx: 80, ry: 40,
+    xAxisRotationDegrees: 0,
+    largeArcFlag: false,
+    sweepFlag: true,
+    x_end: 250, y_end: 150);
+canvas.SetStrokeColor(Color32.FromArgb(255, 200, 100, 255));
+canvas.SetStrokeWidth(2f);
+canvas.Stroke();
+```
+
+---
+
+## Bézier Curves
+
+### `BezierCurveTo`
+
+Appends a cubic Bézier curve from the current point to `(x, y)` using two control points `(cp1x, cp1y)` and `(cp2x, cp2y)`. The curve is adaptively subdivided using the Casteljau algorithm until it is within the current tessellation tolerance.
+
+```csharp
+void BezierCurveTo(float cp1x, float cp1y, float cp2x, float cp2y, float x, float y)
+```
+
+```csharp
+// Smooth S-curve
+canvas.BeginPath();
+canvas.MoveTo(30, 150);
+canvas.BezierCurveTo(
+    cp1x: 80,  cp1y: 30,    // First control point (pulls upward)
+    cp2x: 170, cp2y: 270,   // Second control point (pulls downward)
+    x:    220, y:    150);  // End point
+canvas.SetStrokeColor(Color32.FromArgb(255, 100, 200, 255));
+canvas.SetStrokeWidth(3f);
+canvas.Stroke();
+```
+
+---
+
+### `QuadraticCurveTo`
+
+Appends a quadratic Bézier curve from the current point to `(x, y)` with one control point `(cpx, cpy)`. Internally Quill **promotes this to a cubic Bézier** using the standard degree-elevation formula:
+
+```
+cp1 = currentPoint + (2/3) × (control − currentPoint)
+cp2 = endPoint     + (2/3) × (control − endPoint)
+```
+
+This means `QuadraticCurveTo` is rendered by the same Casteljau subdivision as cubic curves — no separate code path, no quality difference.
+
+```csharp
+void QuadraticCurveTo(float cpx, float cpy, float x, float y)
+```
+
+```csharp
+canvas.BeginPath();
+canvas.MoveTo(50, 200);
+canvas.QuadraticCurveTo(
+    cpx: 150, cpy: 50,   // Single control point
+    x:   250, y:   200);
+canvas.SetStrokeColor(Color32.FromArgb(255, 200, 100, 255));
+canvas.SetStrokeWidth(2.5f);
+canvas.Stroke();
+```
+
+---
+
+## Winding Mode
+
+### `SetSolidity(WindingMode)`
+
+Controls which regions of a complex or self-intersecting path are considered "inside" for fill operations. This must be set **before** calling `FillComplex()` or `FillComplexAA()`.
+
+```csharp
+void SetSolidity(WindingMode solidity)
+```
+
+| Value | Description |
+|-------|-------------|
+| `WindingMode.OddEven` | A point is inside if a ray from it crosses an odd number of path segments. Classic even-odd fill rule. |
+| `WindingMode.NonZero` | A point is inside if the winding number is non-zero. Produces filled regions for most artistic shapes. |
+
+```csharp
+// Rectangle with a hole (CCW inner path = OddEven creates the hole)
+canvas.SetSolidity(WindingMode.OddEven);
+canvas.BeginPath();
+
+// Outer rectangle (clockwise)
+canvas.MoveTo(20, 20);
+canvas.LineTo(180, 20);
+canvas.LineTo(180, 130);
+canvas.LineTo(20, 130);
+canvas.ClosePath();
+
+// Inner hole (counter-clockwise)
+canvas.MoveTo(120, 40);
+canvas.LineTo(60, 40);
+canvas.LineTo(60, 110);
+canvas.LineTo(120, 110);
+canvas.ClosePath();
+
+canvas.SetFillColor(Color32.FromArgb(220, 80, 140, 255));
+canvas.FillComplex();
+```
+
+---
+
+## Rendering the Path
+
+<CardGroup cols={2}>
+  <Card title="Fill()" icon="fill-drip">
+    Fast fan-based fill suitable for **convex** sub-paths. Uses a center-to-edge triangle fan with UV-based shader AA. Do not use for self-intersecting or concave shapes.
+  </Card>
+  <Card title="FillComplex()" icon="shapes">
+    Tessellation-based fill using LibTess. Handles **concave and self-intersecting** paths with full `OddEven` / `NonZero` winding rule support.
+  </Card>
+  <Card title="FillComplexAA()" icon="sparkles">
+    Same as `FillComplex()` but also strokes the path with the fill color at width 1 for smooth anti-aliased edges. Recommended for most complex fills.
+  </Card>
+  <Card title="Stroke()" icon="paintbrush">
+    Renders the path outline using the current stroke color, width, caps, and joints. Works on any path regardless of convexity.
+  </Card>
+</CardGroup>
+
+```csharp
+// Shorthand for Fill() then Stroke()
+void FillAndStroke()
+```
+
+---
+
+## Complete Examples
+
+<Tabs>
+  <Tab title="Triangle">
+
+    A basic filled triangle using three `LineTo` calls and `FillAndStroke`.
+
+    ```csharp
+    canvas.SetFillColor(Color32.FromArgb(200, 100, 180, 255));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(2f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(100, 20);   // Apex
+    canvas.LineTo(180, 140);  // Bottom-right
+    canvas.LineTo(20,  140);  // Bottom-left
+    canvas.ClosePath();
+
+    canvas.FillAndStroke();
+    ```
+
+  </Tab>
+  <Tab title="Rounded Shape with Arcs">
+
+    A rectangle with two rounded corners built manually using `LineTo` and `Arc`.
+
+    ```csharp
+    float x = 30, y = 30, w = 180, h = 100, r = 20;
+
+    canvas.SetFillColor(Color32.FromArgb(220, 60, 140, 220));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(1.5f);
+
+    canvas.BeginPath();
+    // Top-left: sharp corner
+    canvas.MoveTo(x, y);
+    // Top edge → top-right arc
+    canvas.LineTo(x + w - r, y);
+    canvas.Arc(x + w - r, y + r, r, -MathF.PI / 2f, 0f, false);
+    // Right edge → sharp bottom-right
+    canvas.LineTo(x + w, y + h);
+    // Bottom edge → bottom-left arc
+    canvas.LineTo(x + r, y + h);
+    canvas.Arc(x + r, y + h - r, r, MathF.PI / 2f, MathF.PI, false);
+    // Left edge → close
+    canvas.ClosePath();
+
+    canvas.FillAndStroke();
+    ```
+
+  </Tab>
+  <Tab title="Cubic Bézier Curve">
+
+    An S-shaped cubic Bézier demonstrating both control points and tessellation.
+
+    ```csharp
+    // Visualise control points
+    canvas.SetStrokeColor(Color32.FromArgb(60, 255, 255, 255));
+    canvas.SetStrokeWidth(1f);
+    canvas.BeginPath();
+    canvas.MoveTo(40, 160);
+    canvas.LineTo(100, 40);   // CP1
+    canvas.Stroke();
+
+    canvas.BeginPath();
+    canvas.MoveTo(200, 280);
+    canvas.LineTo(260, 160);  // Start of next segment's CP2
+    canvas.Stroke();
+
+    // The actual curve
+    canvas.SetStrokeColor(Color32.FromArgb(255, 80, 200, 255));
+    canvas.SetStrokeWidth(3f);
+    canvas.BeginPath();
+    canvas.MoveTo(40, 160);
+    canvas.BezierCurveTo(
+        cp1x: 100, cp1y: 40,
+        cp2x: 200, cp2y: 280,
+        x:    260, y:    160);
+    canvas.Stroke();
+    ```
+
+  </Tab>
+</Tabs>
+
+---
+
+## Tessellation and Tolerance
+
+Two settings influence curve quality and performance:
+
+```csharp
+// Reduce for smoother curves (more triangles); increase for better performance
+canvas.SetTessellationTolerance(0.5f); // Default: 0.5
+
+// Minimum arc point spacing in logical units
+canvas.SetRoundingMinDistance(3f);     // Default: 3
+```
+
+<Tip>
+  The defaults work well at 1× to 2× DPI. If you are zooming in significantly (e.g. a vector illustration editor), lower `TessellationTolerance` to `0.1f` to maintain smooth curves at high zoom levels.
+</Tip>

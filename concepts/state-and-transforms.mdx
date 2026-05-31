@@ -1,0 +1,263 @@
+---
+title: "State and Transforms: Managing Canvas Context"
+sidebarTitle: "State & Transforms"
+description: "Master Prowl.Quill's state stack, 2D transform operations, and scissor clipping to isolate and reuse drawing context across your scene."
+---
+
+Every drawing operation in Prowl.Quill reads from a hidden block of properties called the **canvas state**. The state holds everything that determines _how_ a shape is rendered — its transform, colours, stroke style, clipping region, and gradient brush. Because components often need to draw in isolation without disturbing one another, Prowl.Quill provides a push/pop **state stack** modelled after HTML Canvas and OpenGL: save the current state, draw what you need, then restore the state exactly as you left it.
+
+## What Is in the State?
+
+The internal `ProwlCanvasState` struct bundles the following properties together:
+
+| Category | Fields |
+|---|---|
+| **Transform** | `transform` (current `Transform2D` matrix) |
+| **Stroke** | `strokeColor`, `strokeWidth`, `strokeScale`, `strokeJoint`, `strokeStartCap`, `strokeEndCap`, `strokeDashPattern`, `strokeDashOffset`, `miterLimit` |
+| **Fill** | `fillColor`, `fillMode` (`WindingMode`) |
+| **Quality** | `tess_tol` (curve tessellation tolerance), `roundingMinDistance` |
+| **Scissor** | `scissor` transform, `scissorExtent` |
+| **Brush** | `brush` (gradient type, colours, texture, shader, backdrop blur) |
+
+All of these values travel together on the stack — a single `SaveState` / `RestoreState` pair snapshots and reverts the whole group atomically.
+
+## The State Stack
+
+### Saving and Restoring
+
+```csharp
+public void SaveState()
+public void RestoreState()
+public void ResetState()
+```
+
+`SaveState` pushes a copy of the current state onto an internal stack. `RestoreState` pops the most recent saved state and reinstates it, discarding any changes made in between. `ResetState` resets the current state to factory defaults without touching the stack — useful for clearing state mid-frame without affecting saved frames above.
+
+```csharp
+canvas.SaveState();
+
+    // Apply a temporary transform and stroke style
+    canvas.TransformBy(Transform2D.CreateTranslation(200, 100));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 100, 100));
+    canvas.SetStrokeWidth(4f);
+
+    canvas.BeginPath();
+    canvas.MoveTo(0, 0);
+    canvas.LineTo(80, 80);
+    canvas.Stroke();
+
+canvas.RestoreState();
+// Transform and stroke color are back to what they were before SaveState
+```
+
+<Tip>
+  Nest `SaveState` / `RestoreState` pairs as deeply as you need — the stack has no fixed limit. A common pattern is one save/restore per UI component, ensuring each component is self-contained.
+</Tip>
+
+### Typical Nesting Pattern
+
+```csharp
+void DrawWidget(Canvas canvas, float x, float y)
+{
+    canvas.SaveState();
+
+        canvas.TransformBy(Transform2D.CreateTranslation(x, y));
+        canvas.Scissor(0, 0, 200, 80); // clip to widget bounds
+
+        // Draw widget content — transforms and scissor are automatically restored
+        canvas.SetFillColor(Color32.FromArgb(200, 80, 160, 240));
+        canvas.RoundedRectFilled(0, 0, 200, 80, 8, Color32.FromArgb(200, 80, 160, 240));
+
+    canvas.RestoreState();
+}
+```
+
+## Transforms
+
+Prowl.Quill uses a 2D affine transform (`Transform2D`) stored in the canvas state. All drawing coordinates are in **logical units** and are multiplied by this matrix (and then by `FramebufferScale`) before vertices are emitted.
+
+### Core Transform Methods
+
+```csharp
+public void TransformBy(Transform2D t)
+public void ResetTransform()
+public void CurrentTransform(Transform2D xform)
+public Transform2D GetTransform()
+```
+
+| Method | Effect |
+|---|---|
+| `TransformBy(t)` | **Concatenates** `t` onto the right of the current transform (`current = current × t`). |
+| `ResetTransform()` | Sets the current transform to the identity matrix. |
+| `CurrentTransform(xform)` | **Replaces** the current transform with `xform` directly. |
+| `GetTransform()` | Returns the current transform matrix (for reading or cloning). |
+
+### Translate, Rotate, Scale
+
+Use the static factory methods on `Transform2D` and pass them to `TransformBy`:
+
+```csharp
+// Translate — move the origin
+canvas.TransformBy(Transform2D.CreateTranslation(100f, 50f));
+
+// Rotate — angle in radians around the current origin
+canvas.TransformBy(Transform2D.CreateRotation(MathF.PI / 4f)); // 45°
+
+// Scale — uniform or non-uniform
+canvas.TransformBy(Transform2D.CreateScale(2f, 2f));  // double size
+canvas.TransformBy(Transform2D.CreateScale(1.5f, 0.8f)); // squash/stretch
+```
+
+Transforms **accumulate** with each `TransformBy` call. To rotate a shape around its own centre rather than the canvas origin, translate to the centre first, rotate, then translate back:
+
+```csharp
+canvas.SaveState();
+
+    float cx = 100f, cy = 100f, angle = _rotation;
+    canvas.TransformBy(Transform2D.CreateTranslation(cx, cy));
+    canvas.TransformBy(Transform2D.CreateRotation(angle));
+    canvas.TransformBy(Transform2D.CreateTranslation(-cx, -cy));
+
+    canvas.RectFilled(70, 70, 60, 60, Color32.FromArgb(200, 100, 200, 255));
+
+canvas.RestoreState();
+```
+
+### Animating Transforms
+
+A common game-loop pattern combines translation, rotation, and scale based on time:
+
+```csharp
+// In your per-frame render method:
+canvas.SaveState();
+
+    // Centre on screen, then apply user-controlled pan/zoom/rotate
+    canvas.TransformBy(Transform2D.CreateTranslation(canvas.Width / 2, canvas.Height / 2));
+    canvas.TransformBy(
+        Transform2D.CreateTranslation(panOffset.X, panOffset.Y)
+        * Transform2D.CreateRotation(viewRotation)
+        * Transform2D.CreateScale(zoom, zoom)
+    );
+
+    DrawScene(canvas); // all draws in here use the composed transform
+
+canvas.RestoreState();
+```
+
+## Scissor Clipping
+
+The scissor rectangle is an axis-aligned clip region applied in world space. Fragments outside the scissor are discarded by the shader. Unlike a stencil, the scissor is specified in logical-unit space alongside your drawing transforms and is included in the draw-call state hash for batching.
+
+### Setting a Scissor
+
+```csharp
+public void Scissor(float x, float y, float w, float h)
+public void IntersectScissor(float x, float y, float w, float h)
+public void ResetScissor()
+```
+
+`Scissor` replaces the active clip region with the specified rectangle (origin at top-left, size `w × h`). `IntersectScissor` computes the intersection of the current clip with the new rectangle — useful for nested clip regions where a child cannot draw outside its parent. `ResetScissor` removes all clipping.
+
+```csharp
+canvas.SaveState();
+
+    canvas.TransformBy(Transform2D.CreateTranslation(panelX, panelY));
+    canvas.Scissor(0, 0, panelWidth, panelHeight); // clip to panel
+
+    // Content beyond the panel edges is automatically clipped
+    canvas.CircleFilled(panelWidth / 2, panelHeight / 2, 120,
+                        Color32.FromArgb(200, 255, 100, 80));
+
+canvas.RestoreState(); // scissor is also restored
+```
+
+### Intersecting Scissors
+
+When a child component needs to further restrict clipping within a parent's region, call `IntersectScissor` instead of `Scissor`. If no scissor has been set yet, `IntersectScissor` behaves like `Scissor`.
+
+```csharp
+// Parent sets a scissor
+canvas.Scissor(50, 50, 300, 200);
+
+// Child narrows it down
+canvas.IntersectScissor(100, 80, 100, 80); // intersection of the two rects
+
+// Draws here are clipped to the intersection
+canvas.RectFilled(0, 0, 500, 500, Color32.FromArgb(255, 100, 200, 100));
+
+canvas.ResetScissor();
+```
+
+<Warning>
+  Scissor coordinates are interpreted in the **current transform space** at the time `Scissor` or `IntersectScissor` is called. If you rotate the canvas and then set a scissor, the clip region is also rotated. Always set scissors after the relevant transform has been applied.
+</Warning>
+
+## Stroke Style Properties
+
+Stroke appearance is part of the state and persists until changed or restored:
+
+```csharp
+canvas.SetStrokeColor(Color32.FromArgb(255, 255, 200, 80));
+canvas.SetStrokeWidth(4f);
+canvas.SetStrokeScale(zoom);          // multiplier on top of width, useful for viewport zoom
+canvas.SetStrokeJoint(JointStyle.Round);
+canvas.SetStrokeCap(EndCapStyle.Round);   // sets both start and end cap
+canvas.SetStrokeStartCap(EndCapStyle.Butt);
+canvas.SetStrokeEndCap(EndCapStyle.Square);
+canvas.SetMiterLimit(10f);            // miter fallback threshold
+canvas.SetTessellationTolerance(0.25f); // lower = smoother curves
+canvas.SetRoundingMinDistance(2f);    // minimum arc segment length in logical units
+```
+
+### Dashed Lines
+
+```csharp
+canvas.SetStrokeDash(new List<float> { 10f, 5f, 2f, 2f }, offset: 0f);
+// Pattern: 10px dash, 5px gap, 2px dash, 2px gap — repeating
+// Offset: start position within the pattern
+
+canvas.ClearStrokeDash(); // revert to solid line
+```
+
+If the pattern array has an odd number of elements, the library automatically doubles it to make it even (matching SVG's `stroke-dasharray` behaviour).
+
+## Fill and Global Alpha
+
+```csharp
+canvas.SetFillColor(Color32.FromArgb(200, 100, 200, 255));
+canvas.SetGlobalAlpha(0.5f); // scales all vertex alpha values by 0.5
+```
+
+`SetGlobalAlpha` multiplies the alpha of every vertex added while it is active — a lightweight way to fade an entire group of shapes without modifying individual colours.
+
+## Complete Save/Restore Example
+
+```csharp
+// Base state: black stroke, no transform
+canvas.SetStrokeColor(Color32.FromArgb(255, 0, 0, 0));
+canvas.SetStrokeWidth(1f);
+
+// ── Component A ───────────────────────────────────────────────
+canvas.SaveState();
+
+    canvas.TransformBy(Transform2D.CreateTranslation(50, 50));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 100, 100));
+    canvas.SetStrokeWidth(3f);
+    canvas.Scissor(0, 0, 100, 100);
+
+    canvas.RectFilled(10, 10, 80, 80, Color32.FromArgb(200, 255, 80, 80));
+
+canvas.RestoreState();
+// Back to black stroke, width 1, no transform, no scissor
+
+// ── Component B ───────────────────────────────────────────────
+canvas.SaveState();
+
+    canvas.TransformBy(Transform2D.CreateTranslation(200, 50));
+    canvas.SetStrokeColor(Color32.FromArgb(255, 100, 255, 100));
+    canvas.SetStrokeWidth(2f);
+
+    canvas.CircleFilled(50, 50, 40, Color32.FromArgb(200, 80, 255, 80));
+
+canvas.RestoreState();
+```

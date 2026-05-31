@@ -1,0 +1,201 @@
+---
+title: "Vertex Struct — Prowl.Quill Geometry Layout"
+sidebarTitle: "Vertex"
+description: "Reference for the Vertex struct: memory layout, field definitions, UV anti-aliasing conventions, and the constructor used by the Canvas to emit geometry."
+---
+
+`Vertex` is the fundamental unit of geometry in Prowl.Quill. Every filled shape, stroke, and image rectangle is ultimately decomposed into `Vertex` instances that live in the `Canvas.Vertices` list. The struct is decorated with `[StructLayout(LayoutKind.Sequential, Pack = 1)]`, which guarantees a predictable 20-byte layout with no padding. This makes the list safe to upload directly to a GPU vertex buffer via a `fixed`-pointer cast or `Marshal.Copy`.
+
+---
+
+## Memory Layout
+
+```
+Offset  Size  Field
+──────  ────  ─────
+  0       4   x       (float — screen-space X)
+  4       4   y       (float — screen-space Y)
+  8       4   u       (float — U texture coordinate)
+ 12       4   v       (float — V texture coordinate)
+ 16       1   r       (byte  — red component)
+ 17       1   g       (byte  — green component)
+ 18       1   b       (byte  — blue component)
+ 19       1   a       (byte  — alpha component)
+──────  ────
+Total  = 20 bytes
+```
+
+All coordinates are in **physical pixel space** at the time the vertex is
+emitted — the canvas applies both the logical-to-pixel scale
+(`FramebufferScale`) and any active `Transform2D` before writing `x` and `y`.
+UV coordinates are **not** normalised texture UVs for the brush texture; they
+carry a special meaning for the built-in anti-aliasing shader described below.
+
+---
+
+## Static Member
+
+<ResponseField name="SizeInBytes" type="int">
+  Always `20`. Use this constant when computing vertex-buffer byte sizes:
+
+  ```csharp
+  int byteSize = canvas.Vertices.Count * Vertex.SizeInBytes;
+  ```
+</ResponseField>
+
+---
+
+## Core Fields
+
+<ResponseField name="x" type="float">
+  The horizontal position of the vertex in **physical pixel space**. The canvas
+  multiplies the logical-unit position by `FramebufferScale` (and applies the
+  current `Transform2D`) before storing this value.
+</ResponseField>
+
+<ResponseField name="y" type="float">
+  The vertical position of the vertex in physical pixel space.
+</ResponseField>
+
+<ResponseField name="u" type="float">
+  Anti-aliasing U coordinate. See the [UV Conventions](#uv-conventions) section
+  for the exact semantics — this is **not** a texture atlas coordinate.
+</ResponseField>
+
+<ResponseField name="v" type="float">
+  Anti-aliasing V coordinate. See [UV Conventions](#uv-conventions).
+</ResponseField>
+
+<ResponseField name="r" type="byte">
+  Red colour component. Stored as **premultiplied** alpha; `Canvas.AddVertex`
+  performs the premultiplication and global-alpha scaling automatically.
+</ResponseField>
+
+<ResponseField name="g" type="byte">
+  Green colour component (premultiplied).
+</ResponseField>
+
+<ResponseField name="b" type="byte">
+  Blue colour component (premultiplied).
+</ResponseField>
+
+<ResponseField name="a" type="byte">
+  Alpha component. The canvas multiplies this by `Canvas.GlobalAlpha` before
+  premultiplying RGB.
+</ResponseField>
+
+---
+
+## Computed Properties
+
+<ResponseField name="Position" type="Float2">
+  Returns `new Float2(x, y)` — the vertex position as a vector.
+</ResponseField>
+
+<ResponseField name="UV" type="Float2">
+  Returns `new Float2(u, v)` — the anti-aliasing UV pair as a vector.
+</ResponseField>
+
+<ResponseField name="Color" type="Color32">
+  Returns `Color32.FromArgb(a, r, g, b)` — the vertex colour reconstructed from
+  the four raw byte components.
+</ResponseField>
+
+---
+
+## Constructor
+
+```csharp
+public Vertex(in Float2 position, in Float2 UV, in Color32 color)
+```
+
+<ParamField path="position" type="Float2">
+  Screen-space position in physical pixels. Pass the result of
+  `Canvas.TransformPoint` to apply the current canvas transform and scale.
+</ParamField>
+
+<ParamField path="UV" type="Float2">
+  Anti-aliasing UV. Use `(0.5f, 0.5f)` for interior/opaque vertices and
+  `(0f, 0f)` for edge vertices that should be anti-aliased to transparent. See
+  the [UV Conventions](#uv-conventions) section below.
+</ParamField>
+
+<ParamField path="color" type="Color32">
+  The base vertex colour before premultiplication. `Canvas.AddVertex` applies
+  `GlobalAlpha` and premultiplies; pass straight (non-premultiplied) values
+  here.
+</ParamField>
+
+---
+
+## UV Conventions
+
+Prowl.Quill uses the UV channel as an anti-aliasing signal rather than as
+texture mapping coordinates. The fragment shader interprets UV as a coverage
+mask:
+
+| UV value | Meaning |
+|----------|---------|
+| `(0.5, 0.5)` | **Interior / fully opaque** — the fragment is well inside the shape boundary. The shader outputs full coverage. |
+| `(0, 0)` | **Edge / anti-aliased** — the vertex sits on or beyond the shape silhouette. The shader smoothly fades this fragment toward transparent, producing sub-pixel soft edges. |
+
+This scheme allows a single triangle fan to encode both the solid interior and
+the AA fringe without a separate pass. The canvas expands shapes by one
+physical pixel outward, assigning `UV = (0, 0)` to the expanded ring vertices
+and `UV = (0.5, 0.5)` to the interior fan centre. The shader computes coverage
+from the UV magnitude and outputs an alpha that is proportional to how far the
+UV is from zero.
+
+### Example: reading UV from the vertex buffer
+
+```csharp
+foreach (var vertex in canvas.Vertices)
+{
+    bool isEdgeVertex   = vertex.UV.X == 0f && vertex.UV.Y == 0f;
+    bool isInteriorVertex = vertex.UV.X == 0.5f && vertex.UV.Y == 0.5f;
+
+    // In a custom shader, use the UV to compute smooth coverage:
+    // float coverage = smoothstep(0.0, 1.0, length(uv) * 2.0 - 1.0);
+}
+```
+
+### Constructing a custom shape
+
+```csharp
+// Center vertex — fully opaque
+canvas.AddVertex(new Vertex(
+    TransformPoint(center),
+    new Float2(0.5f, 0.5f),
+    fillColor));
+
+// Edge vertices — AA fringe
+foreach (var edgePoint in edgePoints)
+{
+    var screenPt = TransformPoint(edgePoint);
+    var outward  = Float2.Normalize(screenPt - TransformPoint(center));
+    canvas.AddVertex(new Vertex(
+        screenPt + outward,      // push 1 px outward in pixel space
+        new Float2(0f, 0f),      // signals AA edge to shader
+        fillColor));
+}
+```
+
+---
+
+## Unsafe Upload Pattern
+
+Because `Vertex` is `Sequential, Pack = 1`, the vertex list can be pinned and
+uploaded to a native GPU buffer without any marshalling:
+
+```csharp
+var vertices = canvas.Vertices;
+unsafe
+{
+    fixed (Vertex* ptr = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(
+               (System.Collections.Generic.List<Vertex>)vertices))
+    {
+        int byteSize = vertices.Count * Vertex.SizeInBytes;
+        glBufferData(GL_ARRAY_BUFFER, byteSize, (IntPtr)ptr, GL_STREAM_DRAW);
+    }
+}
+```

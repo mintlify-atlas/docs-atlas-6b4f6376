@@ -1,0 +1,272 @@
+---
+title: "Brush & ShaderUniforms — Prowl.Quill Fill State"
+sidebarTitle: "Brush"
+description: "Complete reference for the Brush struct and ShaderUniforms class that control gradients, textures, custom shaders, and backdrop blur in Prowl.Quill."
+---
+
+The `Brush` struct is the fill-state record that every `DrawCall` carries. It describes _how_ geometry is painted: a solid colour from vertex data, a linear or radial gradient, a box gradient with rounded corners, an optional texture overlay, or a fully custom shader. When you call `SetLinearBrush`, `SetRadialBrush`, `SetBoxBrush`, `SetBrushTexture`, or `SetCustomShader` on a `Canvas`, the canvas writes into this struct and snaps a hash so that consecutive draw operations with the same state are batched into a single `DrawCall` automatically.
+
+---
+
+## Fields
+
+<ResponseField name="Transform" type="Transform2D">
+  The 2D transformation applied to gradient coordinates. For linear and radial
+  brushes, `Canvas` automatically copies the current canvas transform here so
+  gradients follow world-space geometry. Modify directly only when you need an
+  independent gradient coordinate system.
+</ResponseField>
+
+<ResponseField name="TextureTransform" type="Transform2D">
+  The 2D transformation applied to texture coordinates. By default the canvas
+  sets this so that one logical unit equals one texel. Override with
+  `Canvas.SetBrushTextureTransform` to tile, offset, or rotate the texture.
+</ResponseField>
+
+<ResponseField name="Type" type="BrushType">
+  Selects the gradient mode. See [BrushType](/api/types/enums#brushtype) for the
+  full description of each value and how `Point1`, `Point2`, `CornerRadii`, and
+  `Feather` are interpreted under each mode.
+</ResponseField>
+
+<ResponseField name="Color1" type="Color32">
+  The primary (inner / start) colour of the gradient.
+
+  - **Linear** — colour at `Point1` (the start of the line).
+  - **Radial** — colour at the centre (`Point1`), blending outward to `Color2`.
+  - **Box** — colour inside the rounded box.
+  - **None** — ignored; colour comes from per-vertex data.
+
+  Colours stored here are **premultiplied** by the canvas before the struct is
+  snapped into a draw call.
+</ResponseField>
+
+<ResponseField name="Color2" type="Color32">
+  The secondary (outer / end) colour of the gradient. Premultiplied, same as
+  `Color1`.
+</ResponseField>
+
+<ResponseField name="Point1" type="Float2">
+  Gradient anchor — interpretation depends on `Type`:
+
+  | BrushType | Meaning of Point1 |
+  |-----------|-------------------|
+  | `Linear`  | Start point of the gradient line |
+  | `Radial`  | Centre of the radial gradient |
+  | `Box`     | Centre of the rounded box |
+  | `None`    | Unused |
+</ResponseField>
+
+<ResponseField name="Point2" type="Float2">
+  Second gradient parameter — interpretation depends on `Type`:
+
+  | BrushType | Meaning of Point2 |
+  |-----------|-------------------|
+  | `Linear`  | End point of the gradient line |
+  | `Radial`  | X = inner radius, Y = outer radius |
+  | `Box`     | X = half-width, Y = half-height of the box |
+  | `None`    | Unused |
+</ResponseField>
+
+<ResponseField name="CornerRadii" type="float">
+  Corner radius for `BrushType.Box` gradients. Controls how rounded the corners
+  of the box are. Has no effect for other brush types.
+</ResponseField>
+
+<ResponseField name="Feather" type="float">
+  Edge-softness amount for `BrushType.Box` gradients. Larger values create a
+  wider, softer fade between the inner and outer colour. Has no effect for other
+  brush types.
+</ResponseField>
+
+<ResponseField name="BackdropBlur" type="float">
+  Backdrop blur radius in pixels. When greater than zero, any shape painted with
+  this brush is composited over a **blurred copy of the framebuffer** behind it,
+  creating a frosted-glass effect. The shape's own fill (solid, gradient, or
+  texture) is layered on top as a tint — use a translucent fill colour for a
+  glass look. This flag is orthogonal to `Type`; it combines with any brush
+  mode. Backends that do not implement `ICanvasRenderer.SupportsBackdropBlur`
+  degrade gracefully to a flat fill.
+</ResponseField>
+
+<ResponseField name="Texture" type="object?">
+  The backend-specific texture object to sample during rendering, or `null` for
+  no texture. Set via `Canvas.SetBrushTexture`. When present, the renderer
+  samples the texture using `TextureMatrix` and multiplies the result against the
+  gradient colour and vertex colour.
+</ResponseField>
+
+<ResponseField name="Shader" type="object?">
+  A backend-specific custom shader object, or `null` to use the built-in default
+  shader. When non-null the renderer **skips** all default uniform uploads; your
+  code is responsible for providing every uniform the shader requires via
+  `Canvas.SetShaderUniform` / `Canvas.SetShaderUniforms`.
+</ResponseField>
+
+<ResponseField name="Uniforms" type="ShaderUniforms?">
+  The collection of custom uniform values forwarded to `Shader`. `null` when no
+  custom shader is active. The canvas clones this object when a new draw call
+  is created so that later mutations cannot retroactively change already-emitted
+  draw calls.
+</ResponseField>
+
+---
+
+## Computed Properties
+
+<ResponseField name="BrushMatrix" type="Float4x4">
+  Returns `Transform.Inverse().ToMatrix()`. The shader multiplies fragment
+  world-space coordinates by this matrix to arrive at gradient-local coordinates
+  before sampling the gradient function.
+</ResponseField>
+
+<ResponseField name="TextureMatrix" type="Float4x4">
+  Returns `TextureTransform.Inverse().ToMatrix()`. Used by the shader to map
+  fragment world-space coordinates into UV space for texture sampling.
+</ResponseField>
+
+---
+
+## Point1 / Point2 / CornerRadii / Feather by BrushType
+
+Understanding how the four geometric parameters are packed into `Point1` and
+`Point2` lets you create brush structs directly or debug gradient artefacts.
+
+### BrushType.Linear
+
+```
+Color1 ───────────────── Color2
+Point1                   Point2
+```
+
+The gradient transitions linearly along the axis from `Point1` to `Point2`.
+`CornerRadii` and `Feather` are ignored.
+
+### BrushType.Radial
+
+```
+         Color1
+       ┌───────┐
+   ─ ─ │  •    │ ─ ─   Color2 begins at inner radius, ends at outer
+       └───────┘
+```
+
+`Point1` is the centre. `Point2.X` is the inner radius (at which `Color1`
+ends) and `Point2.Y` is the outer radius (at which `Color2` begins).
+`CornerRadii` and `Feather` are ignored.
+
+### BrushType.Box
+
+`Point1` is the **centre** of the box. `Point2` stores the **half-extents**
+(`X` = half-width, `Y` = half-height). `CornerRadii` rounds the corners.
+`Feather` controls how wide the soft transition is between inner and outer
+colour.
+
+```
+┌──────────────────┐
+│   Color1         │  ← interior
+│         ╭──╮     │
+│         │  │     │  ← CornerRadii rounds corners
+│         ╰──╯     │
+└──────────────────┘  ← Color2 outside, feathered by Feather
+```
+
+---
+
+## ShaderUniforms
+
+`ShaderUniforms` is a mutable dictionary of named values passed verbatim to a
+custom shader. It supports a fixed set of types that map cleanly to GPU
+primitives: `float`, `int`, `Float2`, `Float3`, `Float4`, and `Float4x4`. The
+canvas uses the dictionary's content hash for draw-call batching; shapes that
+share the same shader reference **and** the same uniform values are batched
+together automatically.
+
+### Fields
+
+<ResponseField name="Values" type="IReadOnlyDictionary<string, object>">
+  Read-only view over the current uniform name-to-value map. Iterate this to
+  upload uniforms inside a custom `ICanvasRenderer.RenderCalls` implementation.
+</ResponseField>
+
+### Methods
+
+<ResponseField name="Set(string name, object value)" type="void">
+  Adds or overwrites a uniform entry. Invalidates the hash cache.
+
+  **Supported value types:** `float`, `int`, `Float2`, `Float3`, `Float4`,
+  `Float4x4`. Passing an unsupported type will not throw at the `ShaderUniforms`
+  layer, but the renderer backend is responsible for handling (or rejecting) it.
+</ResponseField>
+
+<ResponseField name="Remove(string name)" type="void">
+  Removes the uniform with the given name, if it exists. Invalidates the hash
+  cache only if the entry was present.
+</ResponseField>
+
+<ResponseField name="Clear()" type="void">
+  Removes all uniform entries and invalidates the hash cache.
+</ResponseField>
+
+---
+
+## Usage Examples
+
+### Linear gradient brush
+
+```csharp
+canvas.SetLinearBrush(
+    x1: 0,   y1: 0,
+    x2: 200, y2: 0,
+    color1: Color32.FromArgb(255, 255, 80, 0),
+    color2: Color32.FromArgb(255, 80, 0, 255));
+
+canvas.Rect(0, 0, 200, 60);
+canvas.FillComplex();
+```
+
+### Radial gradient brush
+
+```csharp
+canvas.SetRadialBrush(
+    centerX: 100, centerY: 100,
+    innerRadius: 10, outerRadius: 80,
+    innerColor: Color32.FromArgb(255, 255, 255, 0),
+    outerColor: Color32.FromArgb(0,   255, 255, 0));
+
+canvas.CircleFilled(100, 100, 80, Color32.White);
+```
+
+### Box gradient brush (frosted panel)
+
+```csharp
+canvas.SetBoxBrush(
+    centerX: 150, centerY: 100,
+    width: 260, height: 160,
+    radi: 12, feather: 20,
+    innerColor: Color32.FromArgb(200, 255, 255, 255),
+    outerColor: Color32.FromArgb(0,   200, 200, 200));
+
+canvas.RoundedRectFilled(20, 20, 260, 160, 12, Color32.White);
+```
+
+### Custom shader with uniforms
+
+```csharp
+canvas.SetCustomShader(myGlowShader);
+canvas.SetShaderUniform("u_GlowRadius", 8.0f);
+canvas.SetShaderUniform("u_GlowColor", new Float4(1, 0.8f, 0, 1));
+
+canvas.CircleFilled(200, 200, 60, Color32.White);
+
+canvas.ClearCustomShader(); // revert to default shader
+```
+
+### Backdrop blur (frosted glass)
+
+```csharp
+canvas.SetBackdropBlur(16f);
+canvas.SetFillColor(Color32.FromArgb(80, 255, 255, 255)); // translucent tint
+canvas.RoundedRectFilled(50, 50, 300, 180, 16, Color32.White);
+canvas.ClearBackdropBlur();
+```

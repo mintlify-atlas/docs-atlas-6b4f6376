@@ -1,0 +1,175 @@
+---
+title: "DrawCall Struct — Prowl.Quill Render Batching"
+sidebarTitle: "DrawCall"
+description: "Reference for the DrawCall struct: how draw calls batch triangles, carry brush state, expose scissor transforms, and are consumed by ICanvasRenderer."
+---
+
+A `DrawCall` is an immutable snapshot of the canvas rendering state associated with a contiguous run of triangles. Every time the fill colour, brush, scissor rectangle, or any other draw-state property changes, the canvas finalises the current `DrawCall` and starts a new one. Renderer backends iterate the `DrawCall` list returned by `Canvas.DrawCalls`, consuming geometry from the shared `Canvas.Vertices` and `Canvas.Indices` buffers. Because identical draw states are merged automatically, applications typically produce far fewer draw calls than the raw number of shape operations.
+
+---
+
+## Fields
+
+<ResponseField name="ElementCount" type="int">
+  The total number of **index elements** belonging to this draw call. Because
+  every triangle is represented by three indices, the number of triangles in
+  this draw call is `ElementCount / 3`.
+
+  Backends accumulate a running index offset as they iterate draw calls and
+  slice `Canvas.Indices` like this:
+
+  ```csharp
+  int offset = 0;
+  foreach (var dc in drawCalls)
+  {
+      // dc covers Indices[offset .. offset + dc.ElementCount]
+      offset += dc.ElementCount;
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="Brush" type="Brush">
+  The complete brush state (gradient type, colours, texture, shader, uniforms,
+  backdrop blur) in effect for this draw call. See the
+  [Brush reference](/api/types/brush) for a full description of each member.
+</ResponseField>
+
+---
+
+## Properties
+
+<ResponseField name="Texture" type="object?">
+  Convenience accessor for `Brush.Texture`. Returns the backend-specific texture
+  object to bind before issuing draw commands, or `null` if no texture is
+  required. Bind this texture to the appropriate sampler slot before calling the
+  underlying graphics API draw call.
+</ResponseField>
+
+<ResponseField name="Shader" type="object?">
+  Convenience accessor for `Brush.Shader`. When non-null, activate this custom
+  shader instead of the default canvas shader. The renderer must **not** upload
+  the standard brush uniforms when a custom shader is set — the user's
+  `ShaderUniforms` dictionary contains everything the shader needs.
+</ResponseField>
+
+<ResponseField name="ShaderUniforms" type="ShaderUniforms?">
+  Convenience accessor for `Brush.Uniforms`. Null when `Shader` is null.
+  Iterate `ShaderUniforms.Values` to upload each named uniform to the GPU.
+</ResponseField>
+
+---
+
+## Methods
+
+### GetScissor
+
+```csharp
+public void GetScissor(out Float4x4 matrix, out Float2 extent)
+```
+
+Returns the scissor region for this draw call as an axis-aligned transform and a half-extent pair suitable for a rotated-rectangle scissor test in the shader.
+
+<ParamField path="matrix" type="out Float4x4">
+  The inverse of the scissor transform, expressed as a 4×4 matrix. The shader
+  multiplies each fragment's screen-space coordinate by this matrix and
+  compares the result against `extent` to determine whether the fragment is
+  inside the scissor region.
+
+  When scissoring is **disabled**, this is set to the zero matrix and should
+  not be used.
+</ParamField>
+
+<ParamField path="extent" type="out Float2">
+  Half-size of the scissor rectangle in screen pixels. The shader treats a
+  fragment as clipped when `|transformedCoord.xy| > extent`.
+
+  **Sentinel value:** when `extent` is `(-1, -1)`, the scissor is disabled and
+  the renderer should skip the scissor test entirely (all fragments pass).
+</ParamField>
+
+#### Scissor disabled check
+
+```csharp
+dc.GetScissor(out Float4x4 scissorMatrix, out Float2 scissorExtent);
+bool scissorEnabled = scissorExtent.X >= 0 && scissorExtent.Y >= 0;
+```
+
+---
+
+## Renderer Iteration Contract
+
+A renderer backend receives the complete `IReadOnlyList<DrawCall>` from
+`ICanvasRenderer.RenderCalls`. The indices inside `Canvas.Indices` are split
+across draw calls in order; no draw call ever references indices outside its
+own window. Vertices referenced by a draw call's indices may interleave with
+other draw calls (global vertex indices are not reset between draw calls).
+
+### Skeleton iteration loop
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    // Upload vertex and index buffers once per frame
+    UploadGeometry(canvas.Vertices, canvas.Indices);
+
+    int indexOffset = 0;
+
+    foreach (var dc in drawCalls)
+    {
+        // -- Scissor --
+        dc.GetScissor(out Float4x4 scissorMatrix, out Float2 scissorExtent);
+        bool scissorEnabled = scissorExtent.X >= 0;
+
+        // -- Texture --
+        if (dc.Texture != null)
+            BindTexture(dc.Texture, slot: 0);
+        else
+            BindDefaultTexture(slot: 0);
+
+        // -- Shader --
+        if (dc.Shader != null)
+        {
+            ActivateShader(dc.Shader);
+            if (dc.ShaderUniforms != null)
+                foreach (var (name, value) in dc.ShaderUniforms.Values)
+                    UploadUniform(name, value);
+        }
+        else
+        {
+            ActivateDefaultShader();
+
+            // Upload standard brush uniforms
+            UploadBrushUniforms(dc.Brush);
+
+            // Upload scissor uniforms
+            UploadUniform("u_ScissorMatrix", scissorMatrix);
+            UploadUniform("u_ScissorExtent", scissorEnabled ? scissorExtent : new Float2(-1, -1));
+        }
+
+        // -- Draw --
+        int triangleCount = dc.ElementCount / 3;
+        DrawIndexed(indexOffset, dc.ElementCount);
+
+        indexOffset += dc.ElementCount;
+    }
+}
+```
+
+---
+
+## Draw-Call Batching Rules
+
+The canvas batches consecutive draw operations into the **same** `DrawCall`
+as long as all of the following remain unchanged:
+
+- The active scissor transform and extent
+- `Brush.Type`, both colours, both points, `CornerRadii`, `Feather`
+- `Brush.BackdropBlur`
+- `Brush.Texture` reference
+- `Brush.Shader` reference and the hash of `Brush.Uniforms`
+- `Canvas.Transform` (only when it is embedded in the brush)
+
+Calling `Canvas.RequestNewDrawCall()` forces a batch break even when the state
+has not changed, which is useful when a draw operation must remain isolated (for
+example, render-target switches or blend-mode changes managed at the backend
+level).

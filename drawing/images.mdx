@@ -1,0 +1,173 @@
+---
+title: "Drawing Images and Textures with the Prowl.Quill API"
+sidebarTitle: "Images"
+description: "Draw backend textures at a given rect or native size, apply tint colors, and use brush textures with Transform2D for tiling and world-space UV mapping."
+---
+
+Prowl.Quill treats textures as opaque `object` handles created and owned by the **backend renderer**. The canvas never allocates GPU memory directly — it simply records which texture object belongs to each draw call and passes that handle back to the backend's `RenderCalls` implementation. This design makes Quill portable across OpenGL, Vulkan, DirectX, Raylib, SFML, and any other backend that implements `ICanvasRenderer`.
+
+<Note>
+  Textures must be created through the backend renderer's `ICanvasRenderer.CreateTexture` method before being passed to the canvas. The exact type of the returned object is backend-specific (e.g., an `int` OpenGL texture ID wrapped in a `BoxedInt`, or a `Texture2D` object in a Raylib backend). Never instantiate texture objects directly.
+</Note>
+
+## Drawing Images
+
+### `DrawImage` — Explicit Size
+
+Draws a texture mapped into a rectangle at `(x, y)` with the given `width` and `height`. The canvas respects the current transform, scissor region, and global alpha.
+
+```csharp
+void DrawImage(object texture, float x, float y, float width, float height,
+               Color32? tint = null)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `texture` | Backend texture handle created via `ICanvasRenderer.CreateTexture` |
+| `x`, `y` | Top-left corner in logical units |
+| `width`, `height` | Size in logical units (must be positive) |
+| `tint` | Optional color multiplied with each texel. Default `null` = white = no tint |
+
+```csharp
+// Draw a texture scaled to 200×150 logical units
+canvas.DrawImage(myTexture, x: 20, y: 20, width: 200, height: 150);
+
+// Draw with a blue tint
+canvas.DrawImage(
+    myTexture, x: 20, y: 20, width: 200, height: 150,
+    tint: Color32.FromArgb(255, 100, 140, 255));
+
+// Semi-transparent fade
+canvas.DrawImage(
+    myTexture, x: 20, y: 20, width: 200, height: 150,
+    tint: Color32.FromArgb(180, 255, 255, 255));
+```
+
+---
+
+### `DrawImage` — Native Size
+
+Draws a texture at `(x, y)` using the texture's natural pixel dimensions converted to logical units.
+
+```csharp
+void DrawImage(object texture, float x, float y, Color32? tint = null)
+```
+
+The canvas queries `ICanvasRenderer.GetTextureSize(texture)` to determine the native dimensions and then delegates to the explicit-size overload.
+
+```csharp
+// Pixel-perfect at 1× scale
+canvas.DrawImage(iconTexture, x: 10, y: 10);
+
+// With a warm-amber tint
+canvas.DrawImage(iconTexture, x: 10, y: 10,
+    tint: Color32.FromArgb(255, 255, 200, 120));
+```
+
+---
+
+## The Tint Parameter
+
+When `tint` is `null` (or explicitly `new Color32(255, 255, 255, 255)`), texels are drawn at their original colors. A tint color is multiplied component-wise with each texel in the shader, so:
+
+- **White** `(255, 255, 255, 255)` → no change
+- **Red** `(255, 0, 0, 255)` → only the red channel of each texel survives
+- **Alpha 128** → the whole image is 50% transparent
+
+```csharp
+// Desaturated look: tint toward grey
+canvas.DrawImage(photo, 10, 10, 300, 200,
+    tint: Color32.FromArgb(255, 160, 160, 160));
+
+// Invisible (useful for layout debugging)
+canvas.DrawImage(photo, 10, 10, 300, 200,
+    tint: Color32.FromArgb(0, 255, 255, 255));
+```
+
+---
+
+## Brush Textures
+
+For tiling patterns, world-space decals, or textured shapes, you can attach a texture directly to the canvas brush. Unlike `DrawImage` (which creates a temporary brush internally), brush textures persist across draw calls until you clear them.
+
+### `SetBrushTexture`
+
+Attaches a texture to the current brush. By default, the texture transform is initialised so that 1 logical unit = 1 texel, starting at the world origin.
+
+```csharp
+void SetBrushTexture(object? texture)
+```
+
+### `SetBrushTextureTransform`
+
+Controls how world coordinates map to texture UV space. The `transform` is combined with the current canvas transform, so rotating or scaling the canvas also rotates/scales the texture.
+
+```csharp
+void SetBrushTextureTransform(Transform2D transform)
+```
+
+```csharp
+// Tile a 64×64 texture every 64 logical units
+canvas.SetBrushTexture(tileTexture);
+canvas.SetBrushTextureTransform(
+    Transform2D.CreateScale(64, 64)); // Each tile spans 64 × 64 units
+
+// Draw a filled rectangle using the tiled texture
+canvas.RectFilled(0, 0, 512, 512, Color32.FromArgb(255, 255, 255, 255));
+```
+
+### `ClearBrushTexture`
+
+Removes the brush texture and resets the texture transform to identity. Subsequent draws revert to solid-color or gradient fills.
+
+```csharp
+void ClearBrushTexture()
+```
+
+---
+
+## Complete Example
+
+```csharp
+// --- Setup ---
+// Assume 'renderer' is your ICanvasRenderer implementation
+object backgroundTex = renderer.CreateTexture(512, 512);
+renderer.SetTextureData(backgroundTex, fullRect, pixelData); // Upload pixels
+
+object iconTex = renderer.CreateTexture(64, 64);
+renderer.SetTextureData(iconTex, fullRect, iconPixels);
+
+// --- Per frame ---
+canvas.BeginFrame(windowWidth, windowHeight, framebufferScale);
+
+// 1. Tiled background using brush texture
+canvas.SetBrushTexture(backgroundTex);
+canvas.SetBrushTextureTransform(Transform2D.CreateScale(256, 256)); // 2×2 tile
+canvas.RectFilled(0, 0, canvas.Width, canvas.Height,
+    Color32.FromArgb(255, 255, 255, 255));
+canvas.ClearBrushTexture();
+
+// 2. UI panel
+canvas.RoundedRectFilled(40, 40, 320, 200, 12,
+    Color32.FromArgb(220, 20, 24, 32));
+
+// 3. Icon at native size, top-left of panel
+canvas.DrawImage(iconTex, x: 56, y: 56);
+
+// 4. Scaled banner image with alpha fade
+canvas.DrawImage(backgroundTex, x: 40, y: 120, width: 320, height: 120,
+    tint: Color32.FromArgb(200, 255, 255, 255));
+
+// 5. Animated tint on the same icon
+float t = MathF.Sin(_time) * 0.5f + 0.5f; // 0 → 1
+byte r = (byte)(80  + 175 * t);
+byte g = (byte)(180 - 80  * t);
+canvas.DrawImage(iconTex, x: 56, y: 180,
+    tint: Color32.FromArgb(255, r, g, 200));
+
+canvas.Render();
+```
+
+<Tip>
+  When drawing many small icons from a sprite sheet, create one large texture atlas and pass the same texture object for every icon. Use `SetBrushTextureTransform` with a translation offset per icon to select the correct region. This keeps all icon draws in a single GPU draw call.
+</Tip>

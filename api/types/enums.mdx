@@ -1,0 +1,310 @@
+---
+title: "Enums — BrushType, WindingMode, JointStyle, EndCapStyle"
+sidebarTitle: "Enums"
+description: "Reference for all public Prowl.Quill enumerations: BrushType, WindingMode, JointStyle (Bevel/Miter/Round), and EndCapStyle (Butt/Round/Square/Bevel)."
+---
+
+Prowl.Quill exposes four public enumerations that control how paths are filled and stroked. `BrushType` and `WindingMode` live in `Prowl.Quill`; `JointStyle` and `EndCapStyle` are defined in `Prowl.Vector` and used by the canvas stroke API. Understanding each value is essential for producing correct anti-aliased output from the canvas.
+
+---
+
+## BrushType
+
+`BrushType` selects the fill algorithm the shader uses when a `DrawCall` is
+processed. The `Brush.Type` field carries this value and determines how
+`Point1`, `Point2`, `CornerRadii`, and `Feather` are interpreted.
+
+<ResponseField name="None" type="0">
+  **Solid vertex colour.** The fragment colour comes entirely from the
+  interpolated vertex colour. No gradient computation is performed. This is the
+  fastest mode and the default when no brush is active.
+
+  ```csharp
+  canvas.ClearBrush(); // resets to BrushType.None
+  canvas.SetFillColor(Color32.FromArgb(255, 60, 130, 230));
+  canvas.CircleFilled(100, 100, 50, Color32.White);
+  ```
+</ResponseField>
+
+<ResponseField name="Linear" type="1">
+  **Linear gradient.** Colour transitions smoothly along a line from `Point1`
+  (`Color1`) to `Point2` (`Color2`). Pixels outside the gradient line are
+  clamped to the nearest endpoint colour.
+
+  ```csharp
+  canvas.SetLinearBrush(
+      x1: 0,   y1: 50,
+      x2: 200, y2: 50,
+      color1: Color32.FromArgb(255, 255, 100, 0),
+      color2: Color32.FromArgb(255,   0, 100, 255));
+  canvas.Rect(0, 0, 200, 100);
+  canvas.FillComplex();
+  ```
+</ResponseField>
+
+<ResponseField name="Radial" type="2">
+  **Radial gradient.** Colour radiates outward from `Point1` (centre), using
+  `Color1` at the inner radius (`Point2.X`) and transitioning to `Color2` at
+  the outer radius (`Point2.Y`).
+
+  ```csharp
+  canvas.SetRadialBrush(
+      centerX: 150, centerY: 150,
+      innerRadius: 0,  outerRadius: 100,
+      innerColor: Color32.FromArgb(255, 255, 255, 0),
+      outerColor: Color32.FromArgb(0,   255, 100, 0));
+  canvas.CircleFilled(150, 150, 100, Color32.White);
+  ```
+</ResponseField>
+
+<ResponseField name="Box" type="3">
+  **Box gradient.** Fills a rounded rectangle with `Color1` inside and `Color2`
+  outside, with soft feathered edges. `Point1` is the box centre, `Point2`
+  stores the half-extents, `CornerRadii` rounds the corners, and `Feather`
+  controls edge softness.
+
+  ```csharp
+  canvas.SetBoxBrush(
+      centerX: 100, centerY: 80,
+      width: 180, height: 120,
+      radi: 10, feather: 15,
+      innerColor: Color32.FromArgb(220, 255, 255, 255),
+      outerColor: Color32.FromArgb(0,   150, 150, 150));
+  canvas.RoundedRectFilled(10, 20, 180, 120, 10, Color32.White);
+  ```
+</ResponseField>
+
+---
+
+## WindingMode
+
+`WindingMode` controls which regions of a complex or self-intersecting path are
+considered "inside" when filling. It is set via `Canvas.SetSolidity` and affects
+both `Canvas.Fill` and `Canvas.FillComplex`.
+
+<ResponseField name="OddEven">
+  **Even-odd rule** (ISO/CSS default). Cast a ray from any test point. If the
+  ray crosses an **odd** number of path edges, the point is inside; an
+  **even** count means outside. This rule naturally creates "holes" in
+  overlapping sub-paths and is the default fill mode of the canvas.
+
+  ```csharp
+  canvas.SetSolidity(WindingMode.OddEven); // default — no explicit call needed
+  canvas.BeginPath();
+  // Outer square
+  canvas.MoveTo(10, 10); canvas.LineTo(190, 10);
+  canvas.LineTo(190, 190); canvas.LineTo(10, 190); canvas.ClosePath();
+  // Inner square (same winding → creates a hole under OddEven)
+  canvas.MoveTo(50, 50); canvas.LineTo(150, 50);
+  canvas.LineTo(150, 150); canvas.LineTo(50, 150); canvas.ClosePath();
+  canvas.FillComplex(); // inner square punches through
+  ```
+</ResponseField>
+
+<ResponseField name="NonZero">
+  **Non-zero winding rule.** Cast a ray from any test point. Tally +1 for each
+  left-to-right crossing and −1 for each right-to-left crossing. If the total
+  is non-zero, the point is inside. Overlapping sub-paths wound in the same
+  direction accumulate and remain filled; sub-paths wound oppositely punch holes.
+
+  ```csharp
+  canvas.SetSolidity(WindingMode.NonZero);
+  canvas.BeginPath();
+  // Same two squares — inner square is still filled under NonZero
+  // because both wind clockwise (same direction)
+  canvas.MoveTo(10, 10); canvas.LineTo(190, 10);
+  canvas.LineTo(190, 190); canvas.LineTo(10, 190); canvas.ClosePath();
+  canvas.MoveTo(50, 50); canvas.LineTo(150, 50);
+  canvas.LineTo(150, 150); canvas.LineTo(50, 150); canvas.ClosePath();
+  canvas.FillComplex(); // inner square remains solid
+  ```
+</ResponseField>
+
+---
+
+## JointStyle
+
+`JointStyle` (from `Prowl.Vector`) controls how two consecutive stroke segments
+connect at a shared corner. Set via `Canvas.SetStrokeJoint`.
+
+<ResponseField name="Bevel">
+  **Bevel join.** The outer corner is cut off with a straight diagonal line,
+  creating a flat, clipped join. It is the lightest join style in terms of
+  triangle count and is the **default** when no joint style is explicitly set.
+
+  ```
+  ╲│
+   ├─  ← flat diagonal cut
+   │
+  ```
+
+  ```csharp
+  canvas.SetStrokeJoint(JointStyle.Bevel); // default
+  canvas.BeginPath();
+  canvas.MoveTo(50, 100);
+  canvas.LineTo(100, 50);
+  canvas.LineTo(150, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+<ResponseField name="Miter">
+  **Miter join.** The outer corner is extended to a sharp point where the two
+  stroke edges would meet. When the angle between segments is very acute, the
+  spike can become extremely long; the canvas enforces a `MiterLimit` ratio
+  (default 4) and falls back to a bevel join when the limit is exceeded.
+
+  ```
+    ╱
+   ╱  ← sharp point
+  ╱│
+  ```
+
+  ```csharp
+  canvas.SetStrokeJoint(JointStyle.Miter);
+  canvas.SetMiterLimit(6f); // allow longer spikes before bevel fallback
+  canvas.BeginPath();
+  canvas.MoveTo(50, 100);
+  canvas.LineTo(100, 50);
+  canvas.LineTo(150, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+<ResponseField name="Round">
+  **Round join.** The outer corner is filled with a circular arc, producing a
+  smooth, continuous curve. Useful for organic or hand-drawn aesthetics but
+  costs more triangles than bevel or miter.
+
+  ```
+    ╭─
+   ╭╯  ← circular arc
+  ─╯
+  ```
+
+  ```csharp
+  canvas.SetStrokeJoint(JointStyle.Round);
+  canvas.BeginPath();
+  canvas.MoveTo(50, 100);
+  canvas.LineTo(100, 50);
+  canvas.LineTo(150, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+---
+
+## EndCapStyle
+
+`EndCapStyle` (from `Prowl.Vector`) controls how the two open ends of a stroked
+path are terminated. Set via `Canvas.SetStrokeCap` (both ends at once),
+`Canvas.SetStrokeStartCap`, or `Canvas.SetStrokeEndCap`.
+
+<ResponseField name="Butt">
+  **Butt cap.** The stroke ends exactly at the endpoint coordinate with a flat,
+  perpendicular cut. No geometry extends beyond the endpoint. This is the
+  **default** cap style.
+
+  ```
+  ─────┤  ← flat, flush with endpoint
+  ```
+
+  ```csharp
+  canvas.SetStrokeCap(EndCapStyle.Butt); // default
+  canvas.BeginPath();
+  canvas.MoveTo(20, 100);
+  canvas.LineTo(180, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+<ResponseField name="Round">
+  **Round cap.** A semicircle is added at each open end, extending the stroke
+  by half the stroke width beyond the endpoint. Ideal for smooth, natural-
+  looking lines.
+
+  ```
+  ╭───────╮
+  │       │
+  ╰───────╯  ← semicircle at each end
+  ```
+
+  ```csharp
+  canvas.SetStrokeCap(EndCapStyle.Round);
+  canvas.SetStrokeWidth(12f);
+  canvas.BeginPath();
+  canvas.MoveTo(20, 100);
+  canvas.LineTo(180, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+<ResponseField name="Square">
+  **Square cap.** Like `Butt`, but the cap extends exactly half the stroke width
+  beyond the endpoint. The result is a perfectly square termination.
+
+  ```
+  ──────────┐
+            │  ← extends by strokeWidth/2
+  ──────────┘
+  ```
+
+  ```csharp
+  canvas.SetStrokeCap(EndCapStyle.Square);
+  canvas.BeginPath();
+  canvas.MoveTo(20, 100);
+  canvas.LineTo(180, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+<ResponseField name="Bevel">
+  **Bevel cap.** The stroke ends with a 45-degree angled cut, as if the tip
+  were sheared diagonally. Creates a distinctive chisel or calligraphic look
+  especially visible at thicker stroke widths.
+
+  ```
+   ╱│
+  ╱ │  ← diagonal cut
+  ```
+
+  ```csharp
+  canvas.SetStrokeStartCap(EndCapStyle.Bevel);
+  canvas.SetStrokeEndCap(EndCapStyle.Bevel);
+  canvas.SetStrokeWidth(16f);
+  canvas.BeginPath();
+  canvas.MoveTo(20, 100);
+  canvas.LineTo(180, 100);
+  canvas.Stroke();
+  ```
+</ResponseField>
+
+---
+
+## Combined Example: Cap & Joint Showcase
+
+```csharp
+void DrawStyledPath(Canvas canvas, JointStyle joint, EndCapStyle cap, float y)
+{
+    canvas.SetStrokeWidth(8f);
+    canvas.SetStrokeJoint(joint);
+    canvas.SetStrokeCap(cap);
+    canvas.SetStrokeColor(Color32.FromArgb(255, 40, 120, 220));
+
+    canvas.BeginPath();
+    canvas.MoveTo(20,  y);
+    canvas.LineTo(80,  y - 30);
+    canvas.LineTo(140, y + 20);
+    canvas.LineTo(200, y);
+    canvas.Stroke();
+}
+
+// Butt + Bevel
+DrawStyledPath(canvas, JointStyle.Bevel, EndCapStyle.Butt,   40);
+// Round + Round
+DrawStyledPath(canvas, JointStyle.Round, EndCapStyle.Round,  80);
+// Miter + Square
+DrawStyledPath(canvas, JointStyle.Miter, EndCapStyle.Square, 120);
+// Round + Bevel
+DrawStyledPath(canvas, JointStyle.Round, EndCapStyle.Bevel,  160);
+```

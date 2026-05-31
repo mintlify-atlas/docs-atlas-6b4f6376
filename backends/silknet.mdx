@@ -1,0 +1,322 @@
+---
+title: "Silk.NET Backend for Prowl.Quill Vector Graphics"
+sidebarTitle: "Silk.NET"
+description: "Integrate Prowl.Quill with Silk.NET OpenGL. Covers NuGet setup, SilkNetRenderer initialization, the per-frame loop, shader compilation, and backdrop blur."
+---
+
+The Silk.NET backend is structurally identical to the OpenTK backend but uses Silk.NET's low-level OpenGL bindings instead of the OpenTK managed wrappers. Both backends share the same GLSL shaders from `CanvasShaderSource` and implement the same dual Kawase backdrop blur pipeline — the primary difference is in how GL calls are spelled (e.g. `_gl.BufferData(...)` instead of `GL.BufferData(...)`). If your project already depends on Silk.NET for windowing or input, this backend drops in without adding OpenTK as a dependency. It targets OpenGL 3.3 Core Profile and declares `SupportsBackdropBlur = true`.
+
+## Required Packages
+
+```bash
+dotnet add package Silk.NET.OpenGL
+dotnet add package Silk.NET.Windowing
+dotnet add package Silk.NET.Input
+```
+
+`Prowl.Quill`, `Prowl.Scribe`, and `Prowl.Vector` are also required.
+
+## Project Setup
+
+The entry point creates a `WindowOptions` and delegates to a `SilkWindow` class that wraps Silk.NET's `IWindow`:
+
+```csharp
+var options = WindowOptions.Default with
+{
+    Size  = new Silk.NET.Maths.Vector2D<int>(1280, 720),
+    Title = "Silk.NET Quill Example",
+    VSync = true
+};
+
+using var window = new SilkWindow(options);
+window.Run();
+```
+
+## Implementing `ICanvasRenderer`
+
+`SilkNetRenderer` takes a `GL` context in its constructor, following Silk.NET's convention of passing the graphics context rather than relying on a thread-local current context:
+
+```csharp
+public class SilkNetRenderer : ICanvasRenderer, IDisposable
+{
+    public static string FRAGMENT_SHADER_SOURCE => CanvasShaderSource.FragmentShader;
+    private static string VERTEX_SHADER_SOURCE  => CanvasShaderSource.VertexShader;
+
+    private readonly GL _gl;
+    public bool SupportsBackdropBlur => true;
+
+    public SilkNetRenderer(GL gl)
+    {
+        _gl = gl;
+    }
+}
+```
+
+## Initialization
+
+Call `Initialize` once after the OpenGL context has been created (typically inside the window's `OnLoad` callback). It compiles shaders, creates the VAO/VBO/EBO, and sets the initial projection:
+
+```csharp
+public unsafe void Initialize(int width, int height, TextureSilk defaultTexture)
+{
+    _defaultTexture = defaultTexture;
+    CreateShaderProgram();
+    CreateBuffers();
+    UpdateProjection(width, height);
+}
+```
+
+Shader compilation follows the standard pattern — compile vertex and fragment shaders, link the program, then cache all uniform locations at once:
+
+```csharp
+private void CreateShaderProgram()
+{
+    _program = _gl.CreateProgram();
+
+    uint vertShader = CompileShader(ShaderType.VertexShader,   VERTEX_SHADER_SOURCE);
+    uint fragShader = CompileShader(ShaderType.FragmentShader, FRAGMENT_SHADER_SOURCE);
+
+    _gl.AttachShader(_program, vertShader);
+    _gl.AttachShader(_program, fragShader);
+    _gl.LinkProgram(_program);
+    CheckProgramLinking(_program);
+
+    _gl.DetachShader(_program, vertShader);
+    _gl.DetachShader(_program, fragShader);
+    _gl.DeleteShader(vertShader);
+    _gl.DeleteShader(fragShader);
+
+    CacheUniformLocations();
+
+    // Dual Kawase blur programs
+    _blurDownProgram = BuildBlurProgram(CanvasShaderSource.BlurDownsampleShader);
+    _blurUpProgram   = BuildBlurProgram(CanvasShaderSource.BlurUpsampleShader);
+    _blurVao = _gl.GenVertexArray();
+    _blurFbo = _gl.GenFramebuffer();
+}
+
+private void CacheUniformLocations()
+{
+    _projectionLocation       = _gl.GetUniformLocation(_program, "projection");
+    _textureSamplerLocation   = _gl.GetUniformLocation(_program, "texture0");
+    _scissorMatLocation       = _gl.GetUniformLocation(_program, "scissorMat");
+    _scissorExtLocation       = _gl.GetUniformLocation(_program, "scissorExt");
+    _brushMatLocation         = _gl.GetUniformLocation(_program, "brushMat");
+    _brushTypeLocation        = _gl.GetUniformLocation(_program, "brushType");
+    _brushColor1Location      = _gl.GetUniformLocation(_program, "brushColor1");
+    _brushColor2Location      = _gl.GetUniformLocation(_program, "brushColor2");
+    _brushParamsLocation      = _gl.GetUniformLocation(_program, "brushParams");
+    _brushParams2Location     = _gl.GetUniformLocation(_program, "brushParams2");
+    _brushTextureMatLocation  = _gl.GetUniformLocation(_program, "brushTextureMat");
+    _dpiScaleLocation         = _gl.GetUniformLocation(_program, "dpiScale");
+    _backdropTexLocation      = _gl.GetUniformLocation(_program, "backdropTexture");
+    _viewportSizeLocation     = _gl.GetUniformLocation(_program, "viewportSize");
+    _backdropBlurAmountLocation = _gl.GetUniformLocation(_program, "backdropBlurAmount");
+}
+```
+
+Buffer layout mirrors the OpenTK backend — a 20-byte stride with position at offset 0, texcoord at offset 8, and a 4-byte packed RGBA color at offset 16:
+
+```csharp
+private unsafe void CreateBuffers()
+{
+    _vao = _gl.GenVertexArray();
+    _gl.BindVertexArray(_vao);
+
+    _vbo = _gl.GenBuffer();
+    _gl.BindBuffer(BufferTargetARB.ArrayBuffer, _vbo);
+
+    uint stride = (uint)Vertex.SizeInBytes;
+
+    _gl.EnableVertexAttribArray(0); // Position: vec2 at offset 0
+    _gl.VertexAttribPointer(0, 2, VertexAttribPointerType.Float, false, stride, (void*)0);
+
+    _gl.EnableVertexAttribArray(1); // TexCoord: vec2 at offset 8
+    _gl.VertexAttribPointer(1, 2, VertexAttribPointerType.Float, false, stride, (void*)8);
+
+    _gl.EnableVertexAttribArray(2); // Color: vec4 ubyte normalized at offset 16
+    _gl.VertexAttribPointer(2, 4, VertexAttribPointerType.UnsignedByte, true, stride, (void*)16);
+
+    _ebo = _gl.GenBuffer();
+    _gl.BindBuffer(BufferTargetARB.ElementArrayBuffer, _ebo);
+
+    _gl.BindVertexArray(0);
+}
+```
+
+## Per-Frame Loop
+
+```csharp
+// Inside SilkWindow's OnRender callback:
+float dpiScale = (float)window.FramebufferSize.X / window.Size.X;
+_canvas.BeginFrame(window.Size.X, window.Size.Y, dpiScale);
+
+_demos[_currentDemoIndex].RenderFrame(deltaTime, _offset, _zoom, _rotation);
+
+_gl.Clear(ClearBufferMask.ColorBufferBit);
+_canvas.Render();
+```
+
+## `RenderCalls` — Geometry Submission
+
+`RenderCalls` sets up blend state, uploads geometry once per frame, then iterates draw calls through `ProcessDrawCall`:
+
+```csharp
+public unsafe void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    if (drawCalls.Count == 0 || canvas.Vertices.Count == 0) return;
+
+    SetupRenderState();
+    UploadGeometryData(canvas);
+
+    int indexOffset = 0;
+    foreach (var drawCall in drawCalls)
+    {
+        ProcessDrawCall(drawCall, indexOffset, (float)canvas.FramebufferScale);
+        indexOffset += drawCall.ElementCount;
+    }
+
+    _gl.BindVertexArray(0);
+    _gl.UseProgram(0);
+}
+
+private void SetupRenderState()
+{
+    _gl.Disable(EnableCap.DepthTest);
+    _gl.Enable(EnableCap.Blend);
+    _gl.BlendFunc(BlendingFactor.One, BlendingFactor.OneMinusSrcAlpha);
+    _gl.UseProgram(_program);
+    SetProjectionMatrix();
+    _gl.BindVertexArray(_vao);
+    _gl.Uniform1(_textureSamplerLocation, 0);
+}
+```
+
+Inside `ProcessDrawCall`, each draw call can optionally trigger a backdrop blur capture before the main geometry is drawn:
+
+```csharp
+private unsafe void ProcessDrawCall(DrawCall drawCall, int indexOffset, float dpiScale)
+{
+    if (drawCall.Brush.BackdropBlur > 0f)
+        RenderBackdropBlur((float)drawCall.Brush.BackdropBlur);
+
+    TextureSilk texture = (drawCall.Texture as TextureSilk) ?? _defaultTexture;
+    texture.Use(TextureUnit.Texture0);
+
+    if (drawCall.Shader is uint customProgram)
+    {
+        _gl.UseProgram(customProgram);
+        int projLoc = _gl.GetUniformLocation(customProgram, "projection");
+        if (projLoc >= 0) SetMatrix4Uniform(projLoc, _projection);
+        if (drawCall.ShaderUniforms != null)
+            SetCustomUniforms(customProgram, drawCall.ShaderUniforms);
+    }
+    else
+    {
+        _gl.UseProgram(_program);
+        SetProjectionMatrix();
+        _gl.Uniform1(_dpiScaleLocation, dpiScale);
+        drawCall.GetScissor(out var scissorMat, out var scissorExt);
+        SetScissorUniforms(scissorMat, scissorExt);
+        SetBrushUniforms(drawCall.Brush);
+        _gl.Uniform2(_viewportSizeLocation, (float)_fbWidth, (float)_fbHeight);
+        _gl.Uniform1(_backdropTexLocation, 3);
+        _gl.Uniform1(_backdropBlurAmountLocation, (float)drawCall.Brush.BackdropBlur);
+    }
+
+    _gl.DrawElements(
+        PrimitiveType.Triangles,
+        (uint)drawCall.ElementCount,
+        DrawElementsType.UnsignedInt,
+        (void*)(indexOffset * sizeof(uint))
+    );
+}
+```
+
+## Texture Methods
+
+```csharp
+public object CreateTexture(uint width, uint height)
+{
+    return TextureSilk.CreateNew(_gl, width, height);
+}
+
+public Int2 GetTextureSize(object texture)
+{
+    if (texture is not TextureSilk silkTexture)
+        throw new ArgumentException("Invalid texture type");
+    return new Int2((int)silkTexture.Width, (int)silkTexture.Height);
+}
+
+public void SetTextureData(object texture, IntRect bounds, byte[] data)
+{
+    if (texture is not TextureSilk silkTexture)
+        throw new ArgumentException("Invalid texture type");
+    silkTexture.SetData(bounds, data);
+}
+```
+
+## Backdrop Blur
+
+The blur implementation is functionally identical to the OpenTK backend — a six-level mip pyramid, dual Kawase downsample then upsample, result bound on texture unit 3:
+
+```csharp
+private void RenderBackdropBlur(float radius)
+{
+    EnsureBlurTargets(_fbWidth, _fbHeight);
+    ComputeBlurParams(radius, out int iterations, out float offset);
+
+    _gl.Disable(EnableCap.Blend);
+    _gl.BindVertexArray(_blurVao);
+    _gl.ActiveTexture(TextureUnit.Texture0);
+
+    // Blit default framebuffer into level 0 (half-res)
+    _gl.BindFramebuffer(FramebufferTarget.DrawFramebuffer, _blurFbo);
+    _gl.FramebufferTexture2D(FramebufferTarget.DrawFramebuffer,
+        FramebufferAttachment.ColorAttachment0,
+        TextureTarget.Texture2D, _blurTex[0], 0);
+    _gl.BindFramebuffer(FramebufferTarget.ReadFramebuffer, 0);
+    _gl.BlitFramebuffer(0, 0, _fbWidth, _fbHeight,
+        0, 0, _blurSize[0].X, _blurSize[0].Y,
+        ClearBufferMask.ColorBufferBit, BlitFramebufferFilter.Linear);
+
+    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, _blurFbo);
+
+    _gl.UseProgram(_blurDownProgram);
+    for (int i = 0; i < iterations; i++)
+        BlurPass(_blurTex[i], _blurTex[i + 1], _blurSize[i + 1], _downHalfpixelLoc, _blurSize[i]);
+
+    _gl.UseProgram(_blurUpProgram);
+    for (int i = iterations; i > 0; i--)
+        BlurPass(_blurTex[i], _blurTex[i - 1], _blurSize[i - 1], _upHalfpixelLoc, _blurSize[i - 1]);
+
+    // Restore canvas draw state
+    _gl.BindFramebuffer(FramebufferTarget.Framebuffer, 0);
+    _gl.Viewport(0, 0, (uint)_fbWidth, (uint)_fbHeight);
+    _gl.Enable(EnableCap.Blend);
+    _gl.BindVertexArray(_vao);
+
+    // Bind blurred result on unit 3 for the canvas shader
+    _gl.ActiveTexture(TextureUnit.Texture3);
+    _gl.BindTexture(TextureTarget.Texture2D, _blurTex[0]);
+    _gl.ActiveTexture(TextureUnit.Texture0);
+}
+```
+
+## Cleanup
+
+```csharp
+public void Dispose()
+{
+    _gl.DeleteBuffer(_vbo);
+    _gl.DeleteBuffer(_ebo);
+    _gl.DeleteVertexArray(_vao);
+    _gl.DeleteProgram(_program);
+    if (_blurDownProgram != 0) _gl.DeleteProgram(_blurDownProgram);
+    if (_blurUpProgram   != 0) _gl.DeleteProgram(_blurUpProgram);
+    if (_blurVao != 0) _gl.DeleteVertexArray(_blurVao);
+    if (_blurFbo != 0) _gl.DeleteFramebuffer(_blurFbo);
+    for (int i = 0; i < MaxBlurLevels; i++)
+        if (_blurTex[i] != 0) _gl.DeleteTexture(_blurTex[i]);
+}
+```

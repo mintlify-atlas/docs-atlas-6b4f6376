@@ -1,0 +1,238 @@
+---
+title: "Unity Backend for Prowl.Quill Vector Graphics"
+sidebarTitle: "Unity"
+description: "Render Prowl.Quill vector graphics inside Unity using DrawMeshNow and CommandBuffer. Requires netstandard2.1 DLL builds of Quill, Scribe, and Vector in Assets/Plugins."
+---
+
+The Unity backend lets you render anti-aliased 2D vector graphics from Prowl.Quill inside any Unity project. It uses Unity's `Mesh`, `Material`, and `CommandBuffer` APIs rather than calling OpenGL directly, making it compatible with Unity's rendering pipeline across both the Built-in Render Pipeline and (via `CommandBuffer`) URP and HDRP. The renderer is wrapped in a `MonoBehaviour` called `QuillCanvasBehaviour` which handles both screen-space overlay rendering (via camera command buffers) and world-space rendering (via a `RenderTexture` on a quad mesh). Backdrop blur is **not** supported in this backend — `SupportsBackdropBlur` returns `false` and Quill degrades those fills to flat tinted shapes.
+
+<Warning>
+  Unity requires **netstandard2.1** DLL builds of `Quill.dll`, `Scribe.dll`, and `Vector.dll`. Do not use `net8.0` or any other target-framework build. The `Assets/Plugins` folder in the sample contains a `Must all be .net Standard Builds.txt` file as a reminder. Using the wrong build will cause type-load failures at runtime.
+</Warning>
+
+## Installation
+
+1. Build `Prowl.Quill`, `Prowl.Scribe`, and `Prowl.Vector` targeting `netstandard2.1`.
+2. Copy the resulting DLLs into your Unity project's `Assets/Plugins/` folder:
+   - `Assets/Plugins/Quill.dll`
+   - `Assets/Plugins/Scribe.dll`
+   - `Assets/Plugins/Vector.dll`
+3. Copy `QuillCanvasRenderer.cs`, `QuillCanvasBehaviour.cs`, and `QuillShader.shader` from the sample's `Assets/Quill/` folder into your project.
+
+## `QuillCanvasRenderer` — The `ICanvasRenderer` Implementation
+
+`QuillCanvasRenderer` translates Quill's draw calls into Unity mesh submeshes. It holds a single dynamic `Mesh` object whose vertex buffer, index buffer, and submesh descriptors are rebuilt every frame from `canvas.Vertices` and `canvas.Indices`:
+
+```csharp
+public sealed class QuillCanvasRenderer : ICanvasRenderer
+{
+    private Shader     _shader;
+    private Material   _material;
+    private Mesh       _mesh;
+    private Texture2D  _defaultTexture;
+    private MaterialPropertyBlock _propertyBlock;
+    private Camera     _camera;
+
+    // Vertex layout: Position (2 floats) + UV (2 floats) + Color (4 bytes packed as 1 uint)
+    private static readonly VertexAttributeDescriptor[] s_vertexAttributes = new[]
+    {
+        new VertexAttributeDescriptor(VertexAttribute.Position,  VertexAttributeFormat.Float32, 2),
+        new VertexAttributeDescriptor(VertexAttribute.TexCoord0, VertexAttributeFormat.Float32, 2),
+        new VertexAttributeDescriptor(VertexAttribute.Color,     VertexAttributeFormat.UNorm8,  4),
+    };
+}
+```
+
+## Initialization
+
+Call `Initialize` before the first frame, typically from `MonoBehaviour.OnEnable` (done automatically by `QuillCanvasBehaviour`). Pass optional `defaultTexture` and `camera` arguments; if omitted, a 1×1 white texture and `Camera.main` are used:
+
+```csharp
+public void Initialize(int width, int height, Texture2D defaultTexture = null, Camera camera = null)
+{
+    _width  = width;
+    _height = height;
+    _camera = camera;
+
+    _shader = Shader.Find("Quill/CanvasShader");
+    if (_shader == null)
+    {
+        Debug.LogError("QuillCanvasRenderer: Could not find 'Quill/CanvasShader'.");
+        return;
+    }
+
+    _material = new Material(_shader) { hideFlags = HideFlags.HideAndDontSave };
+
+    _mesh = new Mesh {
+        name      = "Quill Canvas Mesh",
+        hideFlags = HideFlags.HideAndDontSave
+    };
+    _mesh.MarkDynamic();
+
+    _propertyBlock = new MaterialPropertyBlock();
+
+    _defaultTexture = defaultTexture ?? CreateDefaultWhiteTexture();
+}
+```
+
+When the screen resizes, call `UpdateSize`:
+
+```csharp
+public void UpdateSize(int width, int height)
+{
+    _width  = width;
+    _height = height;
+}
+```
+
+## `QuillCanvasBehaviour` — The MonoBehaviour Wrapper
+
+`QuillCanvasBehaviour` is an `[ExecuteAlways]` MonoBehaviour that manages the canvas lifecycle and drives the frame loop. Attach it to any GameObject in your scene.
+
+**Inspector properties:**
+
+| Property | Description |
+|---|---|
+| `renderMode` | `Screen` (camera overlay) or `World` (quad in scene) |
+| `camera` | Camera to render to; defaults to `Camera.main` |
+| `cameraEvent` | When to inject the command buffer (`AfterEverything` by default) |
+| `pixelWidth` / `pixelHeight` | Render texture dimensions (World mode only) |
+| `enableDemo` | Toggle the built-in animated demo shapes |
+
+The `Update` method calls `canvas.BeginFrame`, invokes `OnQuillRender` (which you override in a subclass), runs the optional demo, and then flushes the canvas:
+
+```csharp
+private void UpdateScreenMode()
+{
+    var cam    = camera != null ? camera : Camera.main;
+    int width  = cam.pixelWidth;
+    int height = cam.pixelHeight;
+
+    _canvas.BeginFrame(width, height, 1);
+
+    // Virtual — override in a derived MonoBehaviour to draw your content
+    OnQuillRender(_canvas, width, height);
+
+    if (enableDemo)
+        DrawDemo(_canvas, width, height);
+
+    _commandBuffer.Clear();
+    _renderer.RenderCalls(_commandBuffer, _canvas, _canvas.DrawCalls);
+}
+```
+
+### Extending `QuillCanvasBehaviour`
+
+Override `OnQuillRender` in a derived class to draw your own shapes:
+
+```csharp
+public class MyQuillRenderer : QuillCanvasBehaviour
+{
+    protected override void OnQuillRender(Canvas canvas, float width, float height)
+    {
+        canvas.SetStrokeColor(Color32.FromArgb(255, 255, 100, 50));
+        canvas.SetStrokeWidth(4f);
+        canvas.Circle(width / 2f, height / 2f, 80f);
+        canvas.Stroke();
+    }
+}
+```
+
+## `RenderCalls` — Immediate-Mode Path
+
+The immediate-mode `RenderCalls` overload uses `Graphics.DrawMeshNow` inside a `GL.PushMatrix` / `GL.PopMatrix` scope. This path works in the Built-in Render Pipeline:
+
+```csharp
+public void RenderCalls(QuillCanvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    _mesh.Clear(true);
+    _mesh.SetVertexBufferParams(vertices.Count, s_vertexAttributes);
+    _mesh.SetIndexBufferParams(indices.Count, IndexFormat.UInt32);
+    UploadVertices(vertices);
+    UploadIndices(indices);
+    _mesh.subMeshCount = drawCalls.Count;
+
+    // Define each draw call as a submesh
+    int indexOffset = 0;
+    for (int i = 0; i < drawCalls.Count; i++)
+    {
+        _mesh.SetSubMesh(i, new SubMeshDescriptor {
+            topology   = MeshTopology.Triangles,
+            indexStart = indexOffset,
+            indexCount = drawCalls[i].ElementCount,
+            baseVertex = 0,
+        }, NoMeshChecks);
+        indexOffset += drawCalls[i].ElementCount;
+    }
+    _mesh.UploadMeshData(false);
+
+    var projectionMatrix = Matrix4x4.Ortho(0, _width, _height, 0, -1, 1);
+    GL.PushMatrix();
+    GL.LoadProjectionMatrix(projectionMatrix);
+    GL.modelview = Matrix4x4.identity;
+
+    for (int i = 0; i < drawCalls.Count; i++)
+    {
+        var drawCall = drawCalls[i];
+        var texture  = drawCall.Texture as Texture2D ?? _defaultTexture;
+        _material.SetTexture(_MainTexID, texture);
+        _material.SetFloat(_DpiScaleID, (float)canvas.FramebufferScale);
+
+        drawCall.GetScissor(out var scissorMat, out var scissorExt);
+        _material.SetMatrix(_ScissorMatID, ToUnityMatrix(scissorMat));
+        _material.SetVector(_ScissorExtID, new Vector2((float)scissorExt.X, (float)scissorExt.Y));
+
+        var brush = drawCall.Brush;
+        _material.SetMatrix(_BrushMatID,    ToUnityMatrix(brush.BrushMatrix));
+        _material.SetInt(_BrushTypeID,      (int)brush.Type);
+        _material.SetVector(_BrushColor1ID, ToUnityColor(brush.Color1));
+        _material.SetVector(_BrushColor2ID, ToUnityColor(brush.Color2));
+        _material.SetMatrix(_BrushTextureMatID, ToUnityMatrix(brush.TextureMatrix));
+
+        _material.SetPass(0);
+        Graphics.DrawMeshNow(_mesh, Matrix4x4.identity, i);
+    }
+
+    GL.PopMatrix();
+}
+```
+
+## `CommandBuffer` Path (URP / HDRP / SRP)
+
+A second `RenderCalls` overload accepts a `CommandBuffer`, making it compatible with Scriptable Render Pipeline workflows:
+
+```csharp
+public void RenderCalls(CommandBuffer cmd, QuillCanvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    // ... upload mesh data ...
+
+    cmd.SetViewport(new UnityEngine.Rect(0, 0, _width, _height));
+    var viewMatrix       = Matrix4x4.Translate(new Vector3(0.5f / _width, 0.5f / _height, 0f));
+    var projectionMatrix = Matrix4x4.Ortho(0, _width, _height, 0, -1, 1);
+    cmd.SetViewProjectionMatrices(viewMatrix, projectionMatrix);
+
+    for (int i = 0; i < drawCalls.Count; i++)
+    {
+        var drawCall = drawCalls[i];
+        _propertyBlock.SetTexture(_MainTexID, drawCall.Texture as Texture2D ?? _defaultTexture);
+        _propertyBlock.SetFloat(_DpiScaleID, (float)canvas.FramebufferScale);
+        // ... set scissor and brush properties on _propertyBlock ...
+        cmd.DrawMesh(_mesh, Matrix4x4.identity, _material, i, -1, _propertyBlock);
+    }
+}
+```
+
+## Cleanup
+
+```csharp
+public void Dispose()
+{
+    if (_mesh     != null) { UnityEngine.Object.DestroyImmediate(_mesh);     _mesh     = null; }
+    if (_material != null) { UnityEngine.Object.DestroyImmediate(_material); _material = null; }
+    if (_defaultTexture != null && _defaultTexture.name == "Quill Default White")
+    {
+        UnityEngine.Object.DestroyImmediate(_defaultTexture);
+        _defaultTexture = null;
+    }
+}
+```

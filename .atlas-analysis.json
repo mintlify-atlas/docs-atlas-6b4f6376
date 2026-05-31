@@ -1,0 +1,154 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Prowl.Quill",
+  "projectDescription": "A hardware-accelerated, anti-aliased 2D vector graphics library for .NET that provides an HTML5 Canvas-style API with support for multiple rendering backends.",
+  "theme": "willow",
+  "primaryColor": "#7C5CBF",
+  "lightColor": "#A882E8",
+  "darkColor": "#4A3278",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/canvas",
+              "concepts/paths-and-drawing",
+              "concepts/state-and-transforms",
+              "concepts/brushes-and-gradients"
+            ]
+          },
+          {
+            "group": "Drawing",
+            "pages": [
+              "drawing/shapes",
+              "drawing/paths",
+              "drawing/strokes",
+              "drawing/text",
+              "drawing/images",
+              "drawing/svg"
+            ]
+          },
+          {
+            "group": "Backends",
+            "pages": [
+              "backends/overview",
+              "backends/opentk",
+              "backends/raylib",
+              "backends/sfml",
+              "backends/silknet",
+              "backends/unity",
+              "backends/webassembly",
+              "backends/custom"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/canvas3d",
+              "advanced/rich-text",
+              "advanced/markdown",
+              "advanced/custom-shaders",
+              "advanced/performance"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Canvas",
+            "pages": [
+              "api/canvas",
+              "api/canvas-state",
+              "api/canvas-transforms",
+              "api/canvas-drawing"
+            ]
+          },
+          {
+            "group": "Types",
+            "pages": [
+              "api/types/brush",
+              "api/types/draw-call",
+              "api/types/vertex",
+              "api/types/enums"
+            ]
+          },
+          {
+            "group": "Renderer Interface",
+            "pages": [
+              "api/icanvas-renderer",
+              "api/svg-renderer",
+              "api/canvas3d"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Hardware-accelerated anti-aliased vector graphics",
+    "HTML5 Canvas-style API for paths, shapes, and curves",
+    "Multiple rendering backends: OpenTK, Raylib, SFML, Silk.NET, Unity, WebAssembly",
+    "Linear, radial, and box gradient brushes",
+    "Full text rendering with font atlas and HiDPI support",
+    "Rich text with animations (wave, shake, typewriter, rainbow effects)",
+    "Markdown rendering with image and link support",
+    "SVG parsing and rendering",
+    "3D-to-2D projection canvas wrapper (Canvas3D)",
+    "Scissor clipping with transform support",
+    "Customizable stroke styles: caps (Butt, Round, Square), joins (Miter, Round, Bevel), dash patterns",
+    "Custom shader and uniform support per draw call",
+    "Backdrop blur (frosted glass) effect",
+    "State stack (SaveState/RestoreState)",
+    "Efficient draw call batching"
+  ],
+  "publicApiSurface": [
+    "Canvas (primary drawing class)",
+    "Canvas.BeginFrame(float width, float height, float framebufferScale)",
+    "Canvas.BeginPath() / MoveTo / LineTo / ClosePath",
+    "Canvas.Arc / ArcTo / BezierCurveTo / QuadraticCurveTo / EllipticalArcTo",
+    "Canvas.Fill() / Stroke() / FillAndStroke() / FillComplex() / FillComplexAA()",
+    "Canvas.Rect / RoundedRect / Circle / Ellipse / Pie",
+    "Canvas.RectFilled / RoundedRectFilled / CircleFilled / PieFilled",
+    "Canvas.DrawImage(object texture, float x, float y, float width, float height)",
+    "Canvas.DrawText / MeasureText / DrawLayout / CreateLayout",
+    "Canvas.CreateRichText / DrawRichText / MeasureRichText / GetRichTextLinkAt",
+    "Canvas.CreateMarkdown / DrawMarkdown / GetMarkdownLinkAt",
+    "Canvas.SaveState() / RestoreState() / ResetState()",
+    "Canvas.TransformBy(Transform2D) / ResetTransform() / GetTransform()",
+    "Canvas.Scissor / IntersectScissor / ResetScissor",
+    "Canvas.SetFillColor / SetStrokeColor / SetStrokeWidth / SetStrokeJoint / SetStrokeCap",
+    "Canvas.SetLinearBrush / SetRadialBrush / SetBoxBrush / ClearBrush",
+    "Canvas.SetBrushTexture / SetBrushTextureTransform / ClearBrushTexture",
+    "Canvas.SetCustomShader / SetShaderUniform / ClearCustomShader",
+    "Canvas.SetBackdropBlur / ClearBackdropBlur",
+    "Canvas.SetStrokeDash / ClearStrokeDash",
+    "Canvas.SetGlobalAlpha",
+    "Canvas.Render()",
+    "Canvas.AddFallbackFont / EnumerateSystemFonts",
+    "Canvas3D (3D projection wrapper)",
+    "ICanvasRenderer (backend interface)",
+    "SVGRenderer.DrawToCanvas(Canvas, Float2, SvgElement)",
+    "SVGParser (SVG document parser)",
+    "DrawCall struct",
+    "Brush struct",
+    "Vertex struct",
+    "ShaderUniforms class",
+    "BrushType enum",
+    "WindingMode enum",
+    "JointStyle enum (Bevel, Miter, Round)",
+    "EndCapStyle enum (Butt, Round, Square, Bevel)"
+  ]
+}

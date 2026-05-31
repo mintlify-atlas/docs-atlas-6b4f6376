@@ -1,0 +1,198 @@
+---
+title: "Custom Shaders and Uniforms in Prowl.Quill"
+sidebarTitle: "Custom Shaders"
+description: "Attach backend-specific shader programs to canvas shapes, set typed uniforms, and leverage automatic batching for shapes with identical shader state."
+---
+
+Every shape drawn by Prowl.Quill is rendered through its backend's default shader, which handles the standard brush types (solid colour, linear/radial/box gradient, textures) and hardware-accelerated antialiasing. When you need effects that go beyond what the built-in brush system offers — glows, distortions, UV animations, or any full-screen technique — you can replace the default shader on the current brush with your own program. The canvas will use your shader for all subsequent shapes, pass your uniforms verbatim, and correctly batch shapes that share the same shader and uniform values into a single draw call.
+
+## Setting a custom shader
+
+```csharp
+public void SetCustomShader(object? shader)
+```
+
+Attach a backend-specific shader object (e.g., a compiled `ShaderProgram` in an OpenGL backend, or an `IPipelineState` in a Direct3D backend) to the current brush. From this point forward, every shape drawn will be rendered with that shader.
+
+```csharp
+canvas.SetCustomShader(myGlowShader);
+```
+
+Pass `null` (or call `ClearCustomShader`) to revert to the default shader.
+
+<Warning>
+Shader objects are backend-specific. A shader compiled for the OpenGL backend will not work with a Vulkan or Direct3D backend. Always check which backend your application is running against before setting a custom shader, and keep platform-specific shader initialisation isolated from your drawing code.
+</Warning>
+
+## Setting uniforms
+
+### Single uniform
+
+```csharp
+public void SetShaderUniform(string name, object value)
+```
+
+Supported value types: `float`, `int`, `Float2`, `Float3`, `Float4`, `Float4x4`.
+
+```csharp
+canvas.SetShaderUniform("u_GlowRadius",    12.5f);
+canvas.SetShaderUniform("u_GlowColor",     new Float4(1f, 0.6f, 0f, 1f));
+canvas.SetShaderUniform("u_Time",          (float)currentTime);
+```
+
+### Multiple uniforms at once
+
+```csharp
+public void SetShaderUniforms(Dictionary<string, object> uniforms)
+```
+
+Equivalent to calling `SetShaderUniform` for each entry, but slightly more convenient when you have many uniforms to set together.
+
+```csharp
+canvas.SetShaderUniforms(new Dictionary<string, object>
+{
+    ["u_GlowRadius"] = 12.5f,
+    ["u_GlowColor"]  = new Float4(1f, 0.6f, 0f, 1f),
+    ["u_Time"]       = (float)currentTime,
+});
+```
+
+## Removing the custom shader
+
+```csharp
+public void ClearCustomShader()
+```
+
+Clears both the custom shader reference and all uniforms, reverting to the default shader and brush behaviour.
+
+```csharp
+canvas.ClearCustomShader();
+```
+
+## The ShaderUniforms class
+
+Uniform state is managed by the `ShaderUniforms` class that lives inside the `Brush`. You normally interact with it indirectly through `SetShaderUniform` / `SetShaderUniforms`, but you can also work with `DrawCall.ShaderUniforms` directly from a renderer implementation.
+
+```csharp
+public class ShaderUniforms
+{
+    /// <summary>Gets all uniform values as a read-only dictionary.</summary>
+    public IReadOnlyDictionary<string, object> Values { get; }
+
+    /// <summary>Sets a uniform. Supported types: float, int, Float2, Float3, Float4, Float4x4.</summary>
+    public void Set(string name, object value);
+
+    /// <summary>Removes a single uniform by name.</summary>
+    public void Remove(string name);
+
+    /// <summary>Clears all uniforms.</summary>
+    public void Clear();
+}
+```
+
+`ShaderUniforms` maintains a dirty hash so the batching system can detect changes without comparing every value on every draw call.
+
+## Batching model
+
+Prowl.Quill batches consecutive shapes into a single `DrawCall` whenever they share the same scissor rectangle, brush (including texture and gradient), and shader + uniforms. Changing the shader, changing any uniform, or calling `RequestNewDrawCall()` flushes the current batch and starts a new one.
+
+<CardGroup cols={2}>
+  <Card title="Same state → one draw call" icon="layer-group">
+    All shapes drawn with the same `SetCustomShader` + `SetShaderUniform` combination are merged into a single GPU draw call automatically.
+  </Card>
+  <Card title="Changed state → new draw call" icon="shuffle">
+    Updating even one uniform value causes the next shape to start a new `DrawCall`. Minimise uniform changes within a frame to keep draw call counts low.
+  </Card>
+</CardGroup>
+
+The renderer receives the snapshot of uniforms that was active when the batch was opened — uniforms are cloned per `DrawCall` so later `Set` calls do not retroactively modify a draw call that has already been recorded.
+
+## Uniform responsibility
+
+When a custom shader is active, the renderer does **not** set the default brush uniforms (gradient matrices, scissor transforms, AA parameters, etc.). Your shader is fully in charge of its own parameters. If you need the standard Quill AA and scissor logic, you must replicate those uniforms in your shader and set them yourself, or compose your effect on top of a post-processing pass.
+
+```csharp
+// The renderer will NOT set u_BrushMatrix, u_ScissorExtent, etc. when a custom shader is active.
+// You are responsible for every uniform your shader reads.
+canvas.SetCustomShader(myDistortionShader);
+canvas.SetShaderUniform("u_Time",      (float)currentTime);
+canvas.SetShaderUniform("u_Amplitude", 5.0f);
+canvas.SetShaderUniform("u_Frequency", 2.0f);
+```
+
+## Complete glowing shape example
+
+<Steps>
+  <Step title="Compile your shader at startup">
+    Compile the shader once using your backend's API and hold a reference. This step is backend-specific.
+
+    ```csharp
+    // Example: OpenGL backend
+    object glowShader = myBackend.CompileShader(
+        vertexSource:   File.ReadAllText("shaders/glow.vert"),
+        fragmentSource: File.ReadAllText("shaders/glow.frag"));
+    ```
+  </Step>
+  <Step title="Set the shader and uniforms before drawing">
+    Set state, draw all shapes that should use the glow effect, then clear the shader.
+
+    ```csharp
+    double currentTime = DateTime.UtcNow.TimeOfDay.TotalSeconds;
+
+    canvas.SetCustomShader(glowShader);
+    canvas.SetShaderUniform("u_Time",       (float)currentTime);
+    canvas.SetShaderUniform("u_GlowRadius", 16.0f);
+    canvas.SetShaderUniform("u_GlowColor",  new Float4(0.2f, 0.8f, 1.0f, 1.0f));
+
+    // All of these will be batched into one draw call (same shader + uniforms)
+    canvas.SetFillColor(Color32.FromArgb(255, 40, 160, 255));
+    canvas.CircleFilled(200f, 200f, 50f, Color32.FromArgb(255, 40, 160, 255));
+    canvas.RectFilled(320f, 170f, 100f, 60f, Color32.FromArgb(255, 40, 200, 180));
+
+    // Changing a uniform starts a new draw call
+    canvas.SetShaderUniform("u_GlowRadius", 8.0f);
+    canvas.CircleFilled(500f, 200f, 30f, Color32.FromArgb(255, 255, 140, 0));
+
+    // Revert to default shader for all other shapes
+    canvas.ClearCustomShader();
+    canvas.RectFilled(10f, 10f, 80f, 30f, Color32.FromArgb(200, 0, 0, 0));
+    ```
+  </Step>
+  <Step title="Save and restore state across custom shader blocks">
+    Use `SaveState` / `RestoreState` to cleanly scope custom shader usage inside a larger drawing routine.
+
+    ```csharp
+    canvas.SaveState();
+
+    canvas.SetCustomShader(glowShader);
+    canvas.SetShaderUniform("u_Time", (float)currentTime);
+    DrawGlowingElements();
+
+    canvas.RestoreState(); // ClearCustomShader is implicit — the saved state had no custom shader
+    ```
+  </Step>
+</Steps>
+
+## Switching between effects
+
+When you need multiple distinct shader effects in one frame, structure your drawing so all shapes sharing the same shader are drawn consecutively — this keeps the draw call count minimal:
+
+```csharp
+// Group 1: glow effect
+canvas.SetCustomShader(glowShader);
+canvas.SetShaderUniform("u_Intensity", 1.0f);
+DrawGlowShapes();
+
+// Group 2: distortion effect (new draw call because shader changed)
+canvas.SetCustomShader(distortShader);
+canvas.SetShaderUniform("u_Amount", 0.3f);
+DrawDistortedShapes();
+
+// Group 3: default rendering
+canvas.ClearCustomShader();
+DrawNormalShapes();
+```
+
+<Note>
+Each `SetCustomShader` or `SetShaderUniform` call marks the draw state dirty, which may start a new `DrawCall` on the next shape. For highest performance, set all uniforms before drawing any shapes rather than interleaving state changes with draw calls.
+</Note>

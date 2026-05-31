@@ -1,0 +1,243 @@
+---
+title: "Raylib Backend for Prowl.Quill Vector Graphics"
+sidebarTitle: "Raylib"
+description: "Integrate Prowl.Quill with Raylib-cs using rlgl. Covers NuGet setup, RaylibCanvasRenderer, the per-frame loop, inline GLSL shaders, and backdrop blur."
+---
+
+The Raylib backend lets you embed Prowl.Quill vector graphics inside any Raylib-cs application with very little boilerplate. It uses `rlgl` — Raylib's thin OpenGL abstraction layer — to submit geometry directly, so it slots naturally between `BeginDrawing()` and `EndDrawing()` without conflicting with Raylib's own render batch. The backend compiles its GLSL shaders from inline strings in `RaylibCanvasRenderer`, which means there are no external shader files to manage. Like the OpenTK and Silk.NET backends, it implements the full dual Kawase backdrop blur pipeline via Raylib `RenderTexture2D` objects, giving you `SupportsBackdropBlur = true` out of the box.
+
+## Required Packages
+
+```bash
+dotnet add package Raylib-cs
+```
+
+`Prowl.Quill`, `Prowl.Scribe`, and `Prowl.Vector` are also required.
+
+## Project Setup and Initialization
+
+Initialize a Raylib window with high-DPI support, create the renderer, and wire up the canvas:
+
+```csharp
+int screenWidth  = 1280;
+int screenHeight = 720;
+SetConfigFlags(ConfigFlags.ResizableWindow | ConfigFlags.HighDpiWindow);
+InitWindow(screenWidth, screenHeight, "Raylib Quill Example");
+SetTargetFPS(60);
+
+var renderer = new RaylibCanvasRenderer();
+
+Canvas canvas = new Canvas(renderer, new FontAtlasSettings());
+```
+
+`RaylibCanvasRenderer` compiles the vertex and fragment shaders in its constructor, so there is no separate `Initialize` call required. The constructor also sets up the dual Kawase blur shaders:
+
+```csharp
+public RaylibCanvasRenderer()
+{
+    shader = LoadShaderFromMemory(Vertex_VS, Stroke_FS);
+    scissorMatLoc = GetShaderLocation(shader, "scissorMat");
+    scissorExtLoc = GetShaderLocation(shader, "scissorExt");
+
+    _brushMatLoc     = GetShaderLocation(shader, "brushMat");
+    _brushTypeLoc    = GetShaderLocation(shader, "brushType");
+    _brushColor1Loc  = GetShaderLocation(shader, "brushColor1");
+    _brushColor2Loc  = GetShaderLocation(shader, "brushColor2");
+    _brushParamsLoc  = GetShaderLocation(shader, "brushParams");
+    _brushParams2Loc = GetShaderLocation(shader, "brushParams2");
+    _dpiScaleLoc     = GetShaderLocation(shader, "dpiScale");
+
+    _blurDown = LoadShaderFromMemory(null, BlurDown_FS);
+    _blurUp   = LoadShaderFromMemory(null, BlurUp_FS);
+}
+```
+
+## Per-Frame Loop
+
+The Raylib frame loop wraps Quill's three-step pattern inside Raylib's own `BeginDrawing` / `EndDrawing` pair:
+
+```csharp
+while (!WindowShouldClose())
+{
+    float dpiScale = (float)GetRenderWidth() / GetScreenWidth();
+
+    // 1. Begin a new canvas frame (clears previous geometry)
+    canvas.BeginFrame(GetScreenWidth(), GetScreenHeight(), dpiScale);
+
+    // 2. Issue drawing commands
+    demos[currentDemoIndex].RenderFrame(GetFrameTime(), offset, zoom, rotation);
+
+    // 3. Flush the canvas inside Raylib's draw window
+    BeginDrawing();
+    ClearBackground(Raylib_cs.Color.Black);
+    canvas.Render();
+    EndDrawing();
+}
+```
+
+<Note>
+  `canvas.BeginFrame` must be called **before** `BeginDrawing`. It is safe to call Quill draw APIs outside of Raylib's draw window, since Quill only accumulates geometry — it does not issue GPU calls until `canvas.Render()`.
+</Note>
+
+## Implementing `ICanvasRenderer`
+
+### Texture Methods
+
+Textures are created as Raylib `Texture2D` objects backed by a temporary `Image` with `PixelFormat.UncompressedR8G8B8A8`. Quill expects all texture objects to remain alive for the lifetime of the canvas:
+
+```csharp
+public object CreateTexture(uint width, uint height)
+{
+    unsafe
+    {
+        var data = new byte[width * height * 4];
+        fixed (byte* dataPtr = data)
+        {
+            Image image = new Image {
+                Data   = (void*)dataPtr,
+                Width  = (int)width,
+                Height = (int)height,
+                Format = PixelFormat.UncompressedR8G8B8A8,
+                Mipmaps = 1
+            };
+            var texture = Raylib_cs.Raylib.LoadTextureFromImage(image);
+            Raylib_cs.Raylib.SetTextureFilter(texture, TextureFilter.Bilinear);
+            return texture;
+        }
+    }
+}
+
+public Int2 GetTextureSize(object texture)
+{
+    if (texture is not Texture2D tex)
+        throw new ArgumentException("Texture must be of type Texture2D");
+    return new Int2(tex.Width, tex.Height);
+}
+
+public void SetTextureData(object texture, IntRect bounds, byte[] data)
+{
+    if (texture is not Texture2D tex)
+        throw new ArgumentException("Texture must be of type Texture2D");
+    Rectangle updateRect = new Rectangle(
+        bounds.Min.X, bounds.Min.Y, bounds.Size.X, bounds.Size.Y);
+    Raylib_cs.Raylib.UpdateTextureRec(tex, updateRect, data);
+}
+```
+
+### `RenderCalls` — Geometry Submission
+
+Geometry is submitted through `Rlgl.Begin(DrawMode.Triangles)`. Each draw call switches shaders and sets uniforms before feeding vertices from `canvas.Vertices` and indices from `canvas.Indices`:
+
+```csharp
+public void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls)
+{
+    int w = GetRenderWidth();
+    int h = GetRenderHeight();
+
+    SetupCanvasProjection(w, h);
+    BeginBlendMode(BlendMode.AlphaPremultiply);
+    Rlgl.DrawRenderBatchActive();
+
+    int index = 0;
+    foreach (var drawCall in canvas.DrawCalls)
+    {
+        bool useCustomShader = drawCall.Shader is Shader;
+        Shader activeShader  = useCustomShader ? (Shader)drawCall.Shader : shader;
+
+        BeginShaderMode(activeShader);
+        Rlgl.Begin(DrawMode.Triangles);
+
+        uint textureToUse = 0;
+        if (drawCall.Texture != null)
+            textureToUse = ((Texture2D)drawCall.Texture).Id;
+        Rlgl.SetTexture(textureToUse);
+
+        if (!useCustomShader)
+            SetUniforms(drawCall, (float)canvas.FramebufferScale);
+
+        for (int i = 0; i < drawCall.ElementCount; i += 3)
+        {
+            var a = canvas.Vertices[(int)canvas.Indices[index]];
+            var b = canvas.Vertices[(int)canvas.Indices[index + 1]];
+            var c = canvas.Vertices[(int)canvas.Indices[index + 2]];
+
+            Rlgl.Color4ub(a.r, a.g, a.b, a.a); Rlgl.TexCoord2f(a.u, a.v); Rlgl.Vertex2f(a.x, a.y);
+            Rlgl.Color4ub(b.r, b.g, b.b, b.a); Rlgl.TexCoord2f(b.u, b.v); Rlgl.Vertex2f(b.x, b.y);
+            Rlgl.Color4ub(c.r, c.g, c.b, c.a); Rlgl.TexCoord2f(c.u, c.v); Rlgl.Vertex2f(c.x, c.y);
+
+            index += 3;
+        }
+        Rlgl.End();
+        Rlgl.DrawRenderBatchActive();
+        EndShaderMode();
+    }
+    Rlgl.SetTexture(0);
+}
+```
+
+## Backdrop Blur
+
+When any draw call requests a backdrop blur, `RenderCalls` renders the canvas scene into an offscreen `RenderTexture2D` first, blurs it using the dual Kawase passes, then blits the composited result to the screen:
+
+```csharp
+if (anyBlur)
+{
+    EnsureTargets(w, h);
+    BeginTextureMode(_sceneRT);
+    ClearBackground(Raylib_cs.Color.Blank);
+}
+
+// ... draw loop as above ...
+
+if (anyBlur)
+{
+    EndTextureMode();
+    // Negative source height flips the render texture upright (Raylib stores them bottom-up)
+    BeginBlendMode(BlendMode.AlphaPremultiply);
+    DrawTexturePro(_sceneRT.Texture,
+        new Rectangle(0, 0, _sceneRT.Texture.Width, -_sceneRT.Texture.Height),
+        new Rectangle(0, 0, w, h),
+        new System.Numerics.Vector2(0, 0), 0f, Raylib_cs.Color.White);
+    EndBlendMode();
+}
+```
+
+<Tip>
+  The Raylib backend stores render textures bottom-up, so the scene blit uses a negative source height to flip the image right-side up. The blur shader itself does not need to flip because the blur passes always map source to destination at full extent.
+</Tip>
+
+## Inline GLSL Shaders
+
+Unlike the OpenTK and Silk.NET backends which share `CanvasShaderSource`, the Raylib backend embeds its shaders as string constants directly in `RaylibCanvasRenderer`. The vertex shader adapts Raylib's built-in attribute layout (`vertexPosition`, `vertexTexCoord`, `vertexColor`) and outputs `fragPos` for the fragment shader:
+
+```glsl
+// Vertex_VS (excerpt)
+#version 330
+in vec3 vertexPosition;
+in vec2 vertexTexCoord;
+in vec4 vertexColor;
+
+uniform mat4 mvp;
+
+out vec2 fragTexCoord;
+out vec4 fragColor;
+out vec2 fragPos;
+
+void main()
+{
+    fragTexCoord = vertexTexCoord;
+    fragColor    = vertexColor;
+    fragPos      = vertexPosition.xy;
+    gl_Position  = mvp * vec4(vertexPosition, 1.0);
+}
+```
+
+## Cleanup
+
+```csharp
+UnloadTexture(demoTexture);
+canvas.Dispose();
+CloseWindow();
+```
+
+`RaylibCanvasRenderer.Dispose` unloads both main and blur shaders and releases all render texture objects.

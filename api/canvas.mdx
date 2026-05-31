@@ -1,0 +1,199 @@
+---
+title: "Canvas — Prowl.Quill 2D Vector Graphics API"
+sidebarTitle: "Canvas"
+description: "Complete reference for the Canvas class: construction, frame lifecycle, coordinate conversion, geometry submission, and rendering in Prowl.Quill."
+---
+
+`Canvas` is the central object of Prowl.Quill. Every drawing operation — paths, shapes, images, text — flows through a single `Canvas` instance bound to a backend renderer. The canvas operates in **logical units**: all coordinates you pass are device-independent, and the canvas converts them to physical pixels using `FramebufferScale` before emitting vertices. This makes HiDPI displays transparent to application code.
+
+## Constructor
+
+```csharp
+public Canvas(ICanvasRenderer renderer, FontAtlasSettings fontAtlasSettings)
+```
+
+Creates a new canvas bound to the given backend renderer. The renderer must implement `ICanvasRenderer` and manages the GPU-side texture and draw-call submission. `fontAtlasSettings` controls how the font atlas is created for text rendering.
+
+<ParamField path="renderer" type="ICanvasRenderer" required>
+  The renderer backend implementation. Throws `ArgumentNullException` when `null`.
+</ParamField>
+
+<ParamField path="fontAtlasSettings" type="FontAtlasSettings" required>
+  Configuration for the font glyph atlas — atlas dimensions, padding, and rasterisation options.
+</ParamField>
+
+```csharp
+// Example: construct a canvas with an OpenGL backend
+ICanvasRenderer renderer = new OpenGLCanvasRenderer();
+var fontSettings = new FontAtlasSettings { AtlasWidth = 2048, AtlasHeight = 2048 };
+var canvas = new Canvas(renderer, fontSettings);
+```
+
+---
+
+## Frame Lifecycle
+
+Prowl.Quill uses an explicit per-frame model. You begin a frame, issue drawing calls, then flush the accumulated geometry to the GPU in a single `Render()` call.
+
+<Steps>
+  <Step title="BeginFrame">
+    Call `BeginFrame(width, height, framebufferScale)` at the start of every frame. This clears all accumulated geometry and resets canvas state to defaults.
+  </Step>
+  <Step title="Draw operations">
+    Issue any combination of path, shape, image, or text drawing calls. State changes (color, transform, scissor, brush) take effect immediately and are preserved across calls until changed or until the next `BeginFrame`.
+  </Step>
+  <Step title="Render">
+    Call `Render()` once per frame to flush all accumulated draw calls to the renderer backend.
+  </Step>
+  <Step title="Next frame">
+    Return to `BeginFrame` for the next frame. The canvas automatically clears itself.
+  </Step>
+</Steps>
+
+### `BeginFrame`
+
+```csharp
+public void BeginFrame(float width, float height, float framebufferScale = 1.0f)
+```
+
+Begins a new frame and resets all accumulated geometry and draw state. All coordinates issued after this call are in logical units.
+
+<ParamField path="width" type="float" required>
+  Canvas width in logical units (typically the window width in CSS/logical pixels).
+</ParamField>
+
+<ParamField path="height" type="float" required>
+  Canvas height in logical units.
+</ParamField>
+
+<ParamField path="framebufferScale" type="float" default="1.0">
+  Ratio of physical pixels to logical pixels. Pass `2.0` for Retina / HiDPI displays.
+  Throws `ArgumentOutOfRangeException` when `<= 0`.
+</ParamField>
+
+```csharp
+// Standard display
+canvas.BeginFrame(windowWidth, windowHeight);
+
+// HiDPI / Retina display
+canvas.BeginFrame(windowWidth, windowHeight, framebufferScale: 2.0f);
+```
+
+### `Render`
+
+```csharp
+public void Render()
+```
+
+Flushes all accumulated draw calls to the renderer backend. Call exactly once per frame, after all drawing is complete and before presenting the frame.
+
+```csharp
+canvas.BeginFrame(800, 600);
+canvas.RectFilled(10, 10, 200, 100, Color32.Red);
+canvas.Render(); // Submit geometry to GPU
+```
+
+### `Dispose`
+
+```csharp
+public void Dispose()
+```
+
+Releases all resources held by the renderer backend. Call when the canvas is no longer needed (e.g., on application shutdown or when the graphics context is destroyed).
+
+```csharp
+canvas.Dispose();
+```
+
+---
+
+## Properties
+
+| Property | Type | Description |
+|---|---|---|
+| `Width` | `float` | Canvas width in logical units (`framebuffer width / FramebufferScale`). |
+| `Height` | `float` | Canvas height in logical units. |
+| `FramebufferScale` | `float` | Physical pixels per logical pixel, set by `BeginFrame`. |
+| `PixelFraction` | `float` | Size of one physical pixel in logical units (`1 / FramebufferScale`). |
+| `Text` | `TextRenderer` | Exposes the `TextRenderer` for advanced font engine access. |
+| `CurrentPoint` | `Float2` | The last point in the active sub-path, or `Float2.Zero` when no path is active. |
+| `DrawCalls` | `IReadOnlyList<DrawCall>` | All draw calls accumulated since the last `BeginFrame`. |
+| `Indices` | `IReadOnlyList<uint>` | Triangle index buffer for all accumulated geometry. |
+| `Vertices` | `IReadOnlyList<Vertex>` | Vertex buffer for all accumulated geometry. |
+
+---
+
+## Coordinate Conversion
+
+The canvas works in logical units throughout its public API. Use these helpers to convert host input coordinates (e.g., mouse positions reported in physical pixels) to logical units, or to compute pixel-exact sizes for assets.
+
+### `PixelToLogical`
+
+```csharp
+public Float2 PixelToLogical(Float2 pixelPoint)
+public float  PixelToLogical(float  pixelValue)
+```
+
+Converts a position or scalar from physical pixel coordinates to logical units by dividing by `FramebufferScale`. Useful for converting raw OS mouse/touch coordinates.
+
+```csharp
+Float2 logicalMouse = canvas.PixelToLogical(rawMousePixelPosition);
+```
+
+### `LogicalToPixel`
+
+```csharp
+public Float2 LogicalToPixel(Float2 logicalPoint)
+public float  LogicalToPixel(float  logicalValue)
+```
+
+Converts a position or scalar from logical units to physical pixel coordinates by multiplying by `FramebufferScale`.
+
+```csharp
+float physicalStrokeWidth = canvas.LogicalToPixel(2.0f); // 4 px on Retina
+```
+
+---
+
+## Low-Level Geometry Submission
+
+These methods are intended for custom renderers, extensions, or performance-critical paths that construct geometry manually rather than through the path API.
+
+### `RequestNewDrawCall`
+
+```csharp
+public void RequestNewDrawCall()
+```
+
+Forces the next geometry submission to start a new draw call, even if the current draw state is identical to the previous one. Use this when you need a guaranteed draw-order boundary (e.g., after changing external render state outside the canvas).
+
+### `AddVertex`
+
+```csharp
+public void AddVertex(Vertex vertex)
+```
+
+Appends a vertex to the vertex buffer. Global alpha and premultiplied-alpha encoding are applied automatically.
+
+<ParamField path="vertex" type="Vertex" required>
+  A `Vertex` containing position (`Float2`), UV coordinates (`Float2`), and a `Color32` color.
+</ParamField>
+
+### `AddTriangle` (overloads)
+
+```csharp
+public void AddTriangle()                          // uses last 3 vertices
+public void AddTriangle(int v1, int v2, int v3)   // signed indices
+public void AddTriangle(uint v1, uint v2, uint v3) // unsigned indices
+```
+
+Appends a triangle to the index buffer. The zero-argument overload references the three most recently added vertices. Index variants reference specific positions in the vertex buffer.
+
+```csharp
+// Manually emit a triangle
+uint base = (uint)canvas.Vertices.Count;
+canvas.AddVertex(new Vertex(p0, uv0, color));
+canvas.AddVertex(new Vertex(p1, uv1, color));
+canvas.AddVertex(new Vertex(p2, uv2, color));
+canvas.AddTriangle(base, base + 1, base + 2);
+```

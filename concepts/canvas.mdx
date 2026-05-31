@@ -1,0 +1,151 @@
+---
+title: "The Canvas Class: Your Drawing Surface"
+sidebarTitle: "Canvas"
+description: "Learn how Canvas acts as the central hub in Prowl.Quill — managing geometry accumulation, HiDPI scaling, draw call batching, and frame lifecycle."
+---
+
+The `Canvas` class is the heart of Prowl.Quill. Every shape you draw, every gradient you paint, and every glyph you render flows through a single `Canvas` instance. Rather than issuing immediate GPU commands, `Canvas` works as an **accumulator**: it collects vertices, indices, and draw-call metadata throughout a frame, then hands everything to an `ICanvasRenderer` backend in one coordinated `Render()` call. This batching model keeps the CPU/GPU boundary thin and gives the backend full visibility into the frame's geometry before any draw commands are issued.
+
+## Constructing a Canvas
+
+```csharp
+public Canvas(ICanvasRenderer renderer, FontAtlasSettings fontAtlasSettings)
+```
+
+You need two things at construction time: a **renderer backend** that implements `ICanvasRenderer` (your OpenGL, DirectX, Vulkan, or custom adapter), and a `FontAtlasSettings` struct that tells the internal text engine how to build its glyph atlas. The constructor throws `ArgumentNullException` when `renderer` is `null`.
+
+```csharp
+// Example: create a canvas with a hypothetical OpenGL backend
+var fontSettings = new FontAtlasSettings { /* ... */ };
+var canvas = new Canvas(myOpenGLRenderer, fontSettings);
+```
+
+## The Frame Lifecycle
+
+Every frame follows a three-step pattern: begin, draw, render.
+
+<Steps>
+  <Step title="BeginFrame — open a new frame">
+    Call `BeginFrame` once at the start of each frame. It resets all accumulated geometry, clears the draw-call list, resets the state stack, and records the logical canvas size and HiDPI scale for the upcoming frame.
+
+    ```csharp
+    public void BeginFrame(float width, float height, float framebufferScale = 1.0f)
+    ```
+
+    `width` and `height` are the **logical** dimensions of your window (i.e. points or CSS pixels, not physical pixels). `framebufferScale` is the ratio of physical pixels to logical pixels — `1.0` for standard displays, `2.0` for Retina/HiDPI.
+
+    ```csharp
+    // Standard display
+    canvas.BeginFrame(windowWidth, windowHeight, 1.0f);
+
+    // Retina / HiDPI display
+    canvas.BeginFrame(windowWidth, windowHeight, 2.0f);
+    ```
+  </Step>
+
+  <Step title="Draw — issue drawing commands">
+    Between `BeginFrame` and `Render`, call any combination of path, shape, text, and image drawing methods. Each command appends vertices and indices to the internal buffers and groups them into batched `DrawCall` records based on the active brush, scissor, and shader state.
+
+    ```csharp
+    canvas.SetFillColor(Color32.FromArgb(255, 100, 200, 255));
+    canvas.CircleFilled(100, 100, 50, Color32.FromArgb(255, 100, 200, 255));
+
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(2f);
+    canvas.BeginPath();
+    canvas.MoveTo(10, 10);
+    canvas.LineTo(200, 150);
+    canvas.Stroke();
+    ```
+  </Step>
+
+  <Step title="Render — flush to the GPU">
+    Call `Render()` once at the very end of the frame. It invokes `ICanvasRenderer.RenderCalls`, passing the accumulated vertex buffer, index buffer, and draw-call list. The backend is then responsible for uploading data and issuing GPU draw commands.
+
+    ```csharp
+    public void Render()
+    ```
+
+    After `Render()` returns, the data is still alive until the next `BeginFrame` clears it — but you should not draw into the canvas between `Render()` and the next `BeginFrame`.
+  </Step>
+</Steps>
+
+## Minimal Per-Frame Pattern
+
+```csharp
+// Called every frame by your game/app loop
+void OnFrame(float windowW, float windowH, float dpiScale, float deltaTime)
+{
+    // 1. Open the frame
+    canvas.BeginFrame(windowW, windowH, dpiScale);
+
+    // 2. Draw everything
+    canvas.SetFillColor(Color32.FromArgb(255, 80, 160, 240));
+    canvas.RectFilled(50, 50, 200, 120, Color32.FromArgb(255, 80, 160, 240));
+
+    canvas.SetStrokeColor(Color32.FromArgb(255, 255, 255, 255));
+    canvas.SetStrokeWidth(3f);
+    canvas.BeginPath();
+    canvas.MoveTo(50, 50);
+    canvas.LineTo(250, 170);
+    canvas.Stroke();
+
+    // 3. Flush geometry to the GPU
+    canvas.Render();
+}
+```
+
+## HiDPI and the Framebuffer Scale
+
+Prowl.Quill separates **logical units** (what you author in) from **physical pixels** (what lands on screen). All coordinates you pass to drawing methods are in logical units; the canvas multiplies them by `FramebufferScale` internally before emitting pixel-space vertices.
+
+| Property | Type | Description |
+|---|---|---|
+| `FramebufferScale` | `float` | Physical pixels per logical unit. Set by `BeginFrame`. |
+| `Width` | `float` | Canvas width in logical units (`framebufferWidth / FramebufferScale`). |
+| `Height` | `float` | Canvas height in logical units. |
+| `PixelFraction` | `float` | Size of one physical pixel in logical units (`1 / FramebufferScale`). |
+
+Two utility helpers convert between the two coordinate spaces, which is especially useful for hit-testing mouse positions from the host OS (which reports physical pixels on HiDPI systems):
+
+```csharp
+// Convert a physical-pixel mouse position to logical units before hit-testing
+Float2 logicalMouse = canvas.PixelToLogical(new Float2(physicalMouseX, physicalMouseY));
+
+// Convert a logical coordinate to physical pixels (e.g. for scissor setup in pixel terms)
+Float2 physicalPos = canvas.LogicalToPixel(new Float2(logicalX, logicalY));
+```
+
+<Note>
+  Font atlases are rasterised at `size × FramebufferScale` physical pixels automatically, so text stays crisp on every display density without any manual scaling in your drawing code.
+</Note>
+
+## Draw Call Batching
+
+`Canvas` minimises GPU state changes by grouping geometry into as few draw calls as possible. Two consecutive shapes are merged into the **same** `DrawCall` when their brush state (gradient, texture, shader, scissor region) is identical. A new `DrawCall` is opened automatically whenever the state changes.
+
+You can inspect the accumulated data at any point after drawing (and before the next `BeginFrame`):
+
+```csharp
+// Read-only views of the accumulated geometry
+IReadOnlyList<DrawCall> calls    = canvas.DrawCalls;  // one entry per state group
+IReadOnlyList<Vertex>   vertices = canvas.Vertices;   // all geometry vertices
+IReadOnlyList<uint>     indices  = canvas.Indices;    // triangle index list
+```
+
+Each `DrawCall` carries:
+- `ElementCount` — the number of index elements (`triangleCount × 3`) belonging to this call.
+- `Brush` — gradient/texture/shader state snapshot captured at the time the call was opened.
+- Scissor transform and extent (retrieved via `GetScissor`).
+
+<Tip>
+  Call `canvas.RequestNewDrawCall()` to explicitly break batching at a specific point — useful when you need the backend to interleave a non-canvas operation (such as a custom render pass) between two groups of shapes.
+</Tip>
+
+## Disposing
+
+`Canvas` implements `IDisposable`. Call `canvas.Dispose()` when you are done with it to release the underlying renderer backend:
+
+```csharp
+canvas.Dispose();
+```

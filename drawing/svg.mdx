@@ -1,0 +1,200 @@
+---
+title: "Parsing and Rendering SVG Vector Files in Prowl.Quill"
+sidebarTitle: "SVG"
+description: "Parse SVG files into an SvgElement tree with SVGParser and render them onto a Canvas with SVGRenderer, supporting path, circle, rect, ellipse, and polygon."
+---
+
+Prowl.Quill includes a built-in SVG pipeline that parses a subset of the SVG specification into an `SvgElement` tree and then walks that tree to emit draw calls onto any `Canvas`. Because the renderer translates every SVG element into the same path and primitive APIs you use directly, SVG shapes benefit from the same hardware-accelerated anti-aliasing and stroke styling as hand-coded drawings.
+
+## Supported Elements
+
+| SVG Element | Class | Notes |
+|-------------|-------|-------|
+| `<path>` | `SvgPathElement` | Full `d` attribute with M/L/H/V/C/S/Q/T/A/Z commands, relative and absolute |
+| `<circle>` | `SvgCircleElement` | `cx`, `cy`, `r` |
+| `<rect>` | `SvgRectElement` | `x`, `y`, `width`, `height`, `rx`, `ry` (rounded corners) |
+| `<line>` | `SvgLineElement` | `x1`, `y1`, `x2`, `y2` |
+| `<ellipse>` | `SvgEllipseElement` | `cx`, `cy`, `rx`, `ry` |
+| `<polyline>` | `SvgPolylineElement` | `points` (open path) |
+| `<polygon>` | `SvgPolygonElement` | `points` (closed path) |
+| `<g>` / `<svg>` | `SvgElement` | Parsed as containers; children are flattened for rendering |
+
+---
+
+## `SVGParser`
+
+`SVGParser` is a static class with a single public method that reads an SVG XML file from disk and returns the root `SvgElement`.
+
+```csharp
+public static SvgElement ParseSVGDocument(string filePath)
+```
+
+The parser:
+1. Loads the XML document via `XmlDocument`.
+2. Walks the element tree recursively, creating the appropriate typed subclass for each tag.
+3. Calls `element.Parse()` on each node to resolve `fill`, `stroke`, `stroke-width`, and element-specific geometry attributes.
+4. Throws `FileNotFoundException` if the path does not exist, or `InvalidOperationException` if the root element is not `<svg>`.
+
+<Note>
+  `SVGParser.ParseSVGDocument` reads the file synchronously. For large SVG assets, parse once at load time and cache the returned `SvgElement` tree — do not call this method every frame.
+</Note>
+
+---
+
+## `SvgElement` Tree
+
+Each node in the parsed tree is an `SvgElement` or one of its typed subclasses. The key properties you will interact with are:
+
+```csharp
+public class SvgElement
+{
+    public TagType                    tag;         // svg, path, circle, rect, …
+    public int                        depth;       // Nesting depth (0 = root)
+    public Dictionary<string, string> Attributes; // Raw XML attributes
+    public List<SvgElement>           Children;   // Child elements
+    public DrawCommand[]              drawCommands;// Path elements only
+    public Color32                    stroke;      // Resolved stroke color
+    public Color32                    fill;        // Resolved fill color
+    public ColorType                  strokeType;  // none | currentColor | specific
+    public ColorType                  fillType;    // none | currentColor | specific
+    public float                      strokeWidth; // Stroke width in SVG units
+}
+```
+
+`SvgElement.Flatten()` recursively collects the element and all its descendants into a single `List<SvgElement>` — this is what `SVGRenderer.DrawToCanvas` uses internally.
+
+---
+
+## `SVGRenderer`
+
+`SVGRenderer` is a static class with two public configuration fields and one drawing method.
+
+### `currentColor`
+
+The `Color32` used whenever an SVG element specifies `fill="currentColor"` or `stroke="currentColor"`. Set this before calling `DrawToCanvas` to control the inherited colour.
+
+```csharp
+public static Color32 currentColor = Color.White; // Default
+```
+
+```csharp
+SVGRenderer.currentColor = Color32.FromArgb(255, 80, 160, 255); // Blue theme
+```
+
+### `debug`
+
+When set to `true`, `DrawToCanvas` prints each processed draw command to `Console.WriteLine`. The flag is automatically reset to `false` after `DrawToCanvas` returns.
+
+```csharp
+public static bool debug = false;
+```
+
+### `DrawToCanvas`
+
+Flattens the `SvgElement` tree and emits the corresponding canvas draw calls at the specified `position` offset.
+
+```csharp
+public static void DrawToCanvas(Canvas canvas, Float2 position, SvgElement svgElement)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `canvas` | The target `Canvas` instance |
+| `position` | World-space offset applied to all element coordinates |
+| `svgElement` | The root element returned by `SVGParser.ParseSVGDocument` |
+
+For each element the renderer:
+1. Calls `canvas.SetStrokeColor` / `canvas.SetFillColor` (or `currentColor` for `currentColor` attributes).
+2. Calls `canvas.SetStrokeWidth` with the element's `strokeWidth`.
+3. Builds the geometry (path commands, circle, rect, etc.) using the canvas path API.
+4. Calls `FillComplexAA()` for filled elements and `Stroke()` for stroked elements.
+
+---
+
+## Complete Example
+
+```csharp
+using Prowl.Quill;
+using Prowl.Vector;
+
+// ── Load once ──────────────────────────────────────────────────────────────
+SvgElement svgRoot = SVGParser.ParseSVGDocument("Assets/icon.svg");
+
+// ── Per frame ──────────────────────────────────────────────────────────────
+canvas.BeginFrame(windowWidth, windowHeight, framebufferScale);
+
+// Set the colour used by elements with fill="currentColor" or stroke="currentColor"
+SVGRenderer.currentColor = Color32.FromArgb(255, 200, 220, 255);
+
+// Draw the SVG at position (50, 50) in logical units
+SVGRenderer.DrawToCanvas(canvas, position: new Float2(50, 50), svgRoot);
+
+canvas.Render();
+```
+
+---
+
+## Animating SVG with Canvas Transforms
+
+Because `DrawToCanvas` uses the canvas path API, any canvas transform active at call time is applied to all SVG geometry. This makes rotation, scaling, and translation trivial:
+
+```csharp
+canvas.SaveState();
+
+// Rotate the entire SVG around its centre
+Float2 svgCenter = new Float2(100, 100); // Approximate visual centre
+canvas.TransformBy(Transform2D.CreateTranslation(svgCenter.X, svgCenter.Y));
+canvas.TransformBy(Transform2D.CreateRotation(_time * 45f)); // Degrees per second * t
+canvas.TransformBy(Transform2D.CreateTranslation(-svgCenter.X, -svgCenter.Y));
+
+SVGRenderer.DrawToCanvas(canvas, Float2.Zero, svgRoot);
+
+canvas.RestoreState();
+```
+
+---
+
+## Inspecting the Element Tree
+
+```csharp
+// Flatten all elements and print them
+List<SvgElement> all = svgRoot.Flatten();
+foreach (SvgElement el in all)
+{
+    Console.WriteLine(el); // "<path Depth=1 Attributes='5' Children='0'>"
+}
+
+// Access specific attributes
+if (all[2] is SvgCircleElement circle)
+{
+    Console.WriteLine($"Circle at ({circle.cx}, {circle.cy}) r={circle.r}");
+}
+
+// Enable debug output for one draw call
+SVGRenderer.debug = true;
+SVGRenderer.DrawToCanvas(canvas, Float2.Zero, svgRoot);
+// debug is automatically reset to false afterwards
+```
+
+---
+
+## Limitations and Notes
+
+<CardGroup cols={2}>
+  <Card title="No CSS / Style Sheets" icon="code">
+    Only inline `fill`, `stroke`, and `stroke-width` XML attributes are parsed. External or `<style>` block CSS is not supported.
+  </Card>
+  <Card title="No Gradients or Patterns" icon="paintbrush">
+    SVG `<linearGradient>`, `<radialGradient>`, and `<pattern>` elements are not rendered. Use Quill's native brush API for gradients.
+  </Card>
+  <Card title="No Transforms on Elements" icon="arrows-rotate">
+    The SVG `transform` attribute on individual elements is not applied. Apply transforms via the canvas state instead.
+  </Card>
+  <Card title="currentColor Requires Manual Setting" icon="palette">
+    Set `SVGRenderer.currentColor` before each `DrawToCanvas` call. It is a static field shared across all concurrent uses.
+  </Card>
+</CardGroup>
+
+<Tip>
+  For icons and UI glyphs, simplify your SVG in a tool like Inkscape or SVGO before shipping: remove metadata, merge paths, and eliminate unsupported features. A flattened SVG with only `<path>` elements renders the fastest and most predictably.
+</Tip>

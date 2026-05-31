@@ -1,0 +1,188 @@
+---
+title: "Canvas Transform API — Prowl.Quill Reference"
+sidebarTitle: "Transforms"
+description: "Full reference for the Canvas transform API: applying, setting, resetting 2D matrices and converting points between logical and pixel coordinate spaces."
+---
+
+Prowl.Quill maintains a single **current transform matrix** as part of the draw state. Every position you pass to a drawing method is multiplied by this matrix before being scaled to physical pixels. The transform is a `Transform2D` — a 2×3 affine matrix that can represent translation, rotation, scale, and skew. Because the transform is part of the state, it participates fully in `SaveState`/`RestoreState`, making nested coordinate-space changes safe and easy to unwind.
+
+All transform methods work in **logical units**. The canvas applies `FramebufferScale` in a separate step, after the transform, so you never need to think about HiDPI when building transforms.
+
+---
+
+## Setting the Transform
+
+### `TransformBy`
+
+```csharp
+public void TransformBy(Transform2D t)
+```
+
+Post-multiplies the current transform by `t`. This is the standard way to accumulate transforms: each call adds a new transformation on top of whatever is already active.
+
+<ParamField path="t" type="Transform2D" required>
+  The transformation to concatenate with the current matrix.
+</ParamField>
+
+```csharp
+// Translate then rotate — operations applied in order
+canvas.TransformBy(Transform2D.CreateTranslation(100, 100));
+canvas.TransformBy(Transform2D.CreateRotate(MathF.PI / 4)); // 45°
+canvas.CircleFilled(0, 0, 30, Color32.Orange); // drawn at (100,100), rotated
+```
+
+### `CurrentTransform`
+
+```csharp
+public void CurrentTransform(Transform2D xform)
+```
+
+Replaces the current transformation matrix entirely. Use this when you have a pre-computed absolute matrix and want to set it directly rather than building it up from individual operations.
+
+<ParamField path="xform" type="Transform2D" required>
+  The matrix to use as the new current transform.
+</ParamField>
+
+### `ResetTransform`
+
+```csharp
+public void ResetTransform()
+```
+
+Resets the current transform to the identity matrix. Equivalent to `CurrentTransform(Transform2D.Identity)`. Subsequent coordinates are passed through unchanged (modulo `FramebufferScale`).
+
+---
+
+## Reading the Transform
+
+### `GetTransform`
+
+```csharp
+public Transform2D GetTransform()
+```
+
+Returns a copy of the current transformation matrix. Useful when you need to inspect or store the transform before modifying it.
+
+```csharp
+Transform2D saved = canvas.GetTransform();
+canvas.TransformBy(Transform2D.CreateScale(2f, 2f));
+// ... draw zoomed content ...
+canvas.CurrentTransform(saved); // manual restore without SaveState
+```
+
+---
+
+## Converting Points
+
+### `TransformPoint`
+
+```csharp
+public Float2 TransformPoint(Float2 unitPoint)
+```
+
+Applies the current transform to `unitPoint` (in logical units) and then multiplies by `FramebufferScale`, returning the result in **physical pixel coordinates**. This is the same computation the canvas performs internally for every path vertex. It is useful when you need a pixel-space position — for example, to pass to an external rendering system or to perform pixel-accurate hit testing.
+
+<ParamField path="unitPoint" type="Float2" required>
+  A point in logical units, in the current canvas coordinate space.
+</ParamField>
+
+```csharp
+Float2 pixelPos = canvas.TransformPoint(new Float2(50, 80));
+// pixelPos is in physical pixel space, after transform and DPI scale
+```
+
+---
+
+## `Transform2D` Factory Methods
+
+`Transform2D` is defined in `Prowl.Vector` and provides static factory methods for building common transforms. These combine cleanly with `TransformBy`.
+
+### Translation
+
+```csharp
+Transform2D.CreateTranslation(float x, float y)
+```
+
+Creates a transform that moves the origin by `(x, y)` in logical units.
+
+### Rotation
+
+```csharp
+Transform2D.CreateRotate(float radians)
+```
+
+Creates a transform that rotates by `radians` around the origin (counter-clockwise, following the standard mathematical convention).
+
+### Scale
+
+```csharp
+Transform2D.CreateScale(float x, float y)
+```
+
+Creates a transform that scales the X axis by `x` and the Y axis by `y`. Pass the same value for both to scale uniformly.
+
+---
+
+## Common Patterns
+
+### Centring the origin of a shape
+
+Draw a shape at its own local origin and use a translation to place it on screen. This makes rotating and scaling around the shape's centre trivial.
+
+```csharp
+canvas.SaveState();
+canvas.TransformBy(Transform2D.CreateTranslation(centerX, centerY));
+canvas.RectFilled(-halfW, -halfH, halfW * 2, halfH * 2, Color32.Coral);
+canvas.RestoreState();
+```
+
+### Rotating a shape around its own centre
+
+Compose a translate-to-centre, rotate, translate-back sequence. Because `TransformBy` post-multiplies, list operations in the order you want them applied.
+
+```csharp
+float cx = 200f, cy = 150f;
+float angle = MathF.PI / 6; // 30°
+
+canvas.SaveState();
+canvas.TransformBy(Transform2D.CreateTranslation(cx, cy));
+canvas.TransformBy(Transform2D.CreateRotate(angle));
+canvas.TransformBy(Transform2D.CreateTranslation(-cx, -cy));
+
+canvas.RoundedRectFilled(cx - 50, cy - 25, 100, 50, 8, Color32.Teal);
+canvas.RestoreState();
+```
+
+### Nested coordinate spaces
+
+Each `SaveState`/`RestoreState` pair creates an isolated scope. Build local transforms inside and the parent space is automatically restored.
+
+```csharp
+// Parent space
+canvas.SaveState();
+canvas.TransformBy(Transform2D.CreateTranslation(50, 50));
+canvas.TransformBy(Transform2D.CreateScale(2f, 2f));
+
+    // Child space (inherits parent transform)
+    canvas.SaveState();
+    canvas.TransformBy(Transform2D.CreateRotate(0.3f));
+    canvas.CircleFilled(0, 0, 20, Color32.Gold);
+    canvas.RestoreState(); // child rotation removed; parent scale+translate still active
+
+canvas.RectFilled(-5, -5, 10, 10, Color32.White); // drawn in parent space
+canvas.RestoreState(); // all transforms cleared
+```
+
+### Uniform zoom
+
+Scale around the canvas centre to implement a zoom-to-point effect:
+
+```csharp
+float zoom = 1.5f;
+float pivotX = canvas.Width  / 2f;
+float pivotY = canvas.Height / 2f;
+
+canvas.TransformBy(Transform2D.CreateTranslation( pivotX,  pivotY));
+canvas.TransformBy(Transform2D.CreateScale(zoom, zoom));
+canvas.TransformBy(Transform2D.CreateTranslation(-pivotX, -pivotY));
+```

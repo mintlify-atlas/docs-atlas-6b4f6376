@@ -1,0 +1,257 @@
+---
+title: "Animated Rich Text Rendering in Prowl.Quill"
+sidebarTitle: "Rich Text"
+description: "Parse, animate, and draw styled rich text with tags for bold, italic, color, wave, shake, rainbow, typewriter, and more — all driven by a time parameter."
+---
+
+Prowl.Quill's rich text system lets you embed formatting and animation directives directly in a string using markup tags. The parser produces a `QuillRichText` object that holds a pre-built glyph layout; drawing it each frame with an updated `currentTime` value brings animations to life — wavy text, typewriter reveals, colour pulses, and rainbow cycling all update automatically. Because layout is computed once at creation time, drawing is inexpensive and the same object can be safely reused across hundreds of frames.
+
+## QuillRichText struct
+
+```csharp
+public struct QuillRichText
+{
+    /// <summary>Layout size in logical units.</summary>
+    public readonly Float2 Size { get; }
+
+    /// <summary>Visible text with all tags stripped (useful for accessibility / clipboard).</summary>
+    public readonly string VisibleText { get; }
+
+    /// <summary>Re-anchors animation start time on the next draw — replays typewriter etc.</summary>
+    public readonly void Reset();
+}
+```
+
+`Size` is in the same logical units as all other canvas coordinates. `VisibleText` strips every tag, making it easy to copy text to the clipboard or feed it to a screen reader. `Reset()` resets the internal animation anchor so effects like typewriter replay from the beginning on the next draw call.
+
+## Creating rich text
+
+```csharp
+public QuillRichText CreateRichText(string source, RichTextLayoutSettings settings)
+```
+
+Parses `source`, performs glyph layout at the current `FramebufferScale`, and returns a `QuillRichText` ready to draw. All dimensional fields in `settings` are specified in **logical units**; the canvas scales them to physical pixels internally for HiDPI output.
+
+```csharp
+public Float2 MeasureRichText(string source, RichTextLayoutSettings settings)
+```
+
+Convenience wrapper that creates a layout, reads its `Size`, and discards it. If you also need to draw the text, use `CreateRichText` + `QuillRichText.Size` instead to avoid parsing twice.
+
+## Drawing rich text
+
+```csharp
+public void DrawRichText(
+    QuillRichText text,
+    Float2 position,
+    double currentTime,
+    Float2? origin = null)
+```
+
+Renders the pre-built layout at `position` (logical units). `currentTime` is in seconds and drives all time-based effects. The optional `origin` parameter is a normalised anchor: `(0, 0)` is the top-left of the text block, `(0.5f, 0.5f)` centres it, and `(1, 1)` anchors it at the bottom-right.
+
+<Note>
+`currentTime` is the heartbeat of every animation effect. Pass `DateTime.UtcNow.TimeOfDay.TotalSeconds` or your game engine's accumulated time to keep animations running smoothly. The first draw call after `CreateRichText` (or after `Reset()`) anchors the animation start to that `currentTime` value, so typewriter effects always begin at zero regardless of the absolute time you pass.
+</Note>
+
+## Hit-testing links
+
+```csharp
+public bool GetRichTextLinkAt(
+    QuillRichText text,
+    Float2 renderOffset,
+    Float2 point,
+    bool useScissor,
+    out string href)
+```
+
+Returns `true` and sets `href` when `point` (in logical units) falls inside a `<link>` span. Pass the same `position` you used in `DrawRichText` as `renderOffset`. Set `useScissor` to `true` to automatically return `false` for points outside the current scissor region — useful for scrollable panels.
+
+## RichTextLayoutSettings
+
+All fields listed below are in **logical units** unless noted as unitless ratios or speeds.
+
+<Accordion title="Font selection">
+| Field | Type | Description |
+|---|---|---|
+| `RegularFont` | `FontFile` | Default body font |
+| `BoldFont` | `FontFile` | Font used by `<b>` |
+| `ItalicFont` | `FontFile` | Font used by `<i>` |
+| `BoldItalicFont` | `FontFile` | Font used by `<b><i>` |
+| `MonoFont` | `FontFile` | Font used by `<mono>` |
+</Accordion>
+
+<Accordion title="Layout">
+| Field | Type | Description |
+|---|---|---|
+| `PixelSize` | `float` | Base font size in logical units |
+| `LineHeight` | `float` | Multiplier applied to line height |
+| `LetterSpacing` | `float` | Extra spacing between glyphs |
+| `WordSpacing` | `float` | Extra spacing between words |
+| `TabSize` | `int` | Width of a tab stop in spaces |
+| `MaxWidth` | `float` | Wrap width (`0` = no wrapping) |
+| `WrapMode` | `WrapMode` | Word / character wrapping strategy |
+| `Alignment` | `TextAlignment` | Left / Centre / Right |
+| `DefaultColor` | `FontColor` | Base text colour |
+</Accordion>
+
+<Accordion title="Shake effect">
+| Field | Description |
+|---|---|
+| `DefaultShakeAmp` | Amplitude of the random per-character displacement (logical units) |
+| `DefaultShakeFreq` | How many shake updates per second |
+</Accordion>
+
+<Accordion title="Wave effect">
+| Field | Description |
+|---|---|
+| `DefaultWaveAmp` | Vertical amplitude of the sine wave (logical units) |
+| `DefaultWaveFreq` | Frequency of the wave cycle |
+| `DefaultWavePhase` | Phase offset between adjacent characters |
+</Accordion>
+
+<Accordion title="Rainbow effect">
+| Field | Description |
+|---|---|
+| `DefaultRainbowSpeed` | How fast hue cycles (unitless) |
+| `DefaultRainbowSpread` | Hue spread across the text block |
+| `DefaultRainbowSat` | HSV saturation (0–1) |
+| `DefaultRainbowValue` | HSV value / brightness (0–1) |
+</Accordion>
+
+<Accordion title="Pulse, fade, jitter, and typewriter effects">
+| Field | Description |
+|---|---|
+| `DefaultPulseSpeed` | Alpha/brightness pulse rate |
+| `DefaultPulseAmp` | Pulse amplitude (relative scale, not pixels) |
+| `DefaultFadeSpeed` | Fade-in speed |
+| `DefaultJitterAmp` | Random per-character jitter amplitude (logical units) |
+| `DefaultJitterFreq` | Jitter update rate |
+| `DefaultTypewriterSpeed` | Characters revealed per second |
+| `DefaultTypewriterFadeIn` | Fade-in duration for each revealed character |
+</Accordion>
+
+## Available tags
+
+<Tabs>
+  <Tab title="Formatting">
+    | Tag | Effect |
+    |---|---|
+    | `<b>…</b>` | Bold text (uses `BoldFont`) |
+    | `<i>…</i>` | Italic text (uses `ItalicFont`) |
+    | `<mono>…</mono>` | Monospace text (uses `MonoFont`) |
+    | `<color=#RRGGBB>…</color>` | Hex colour override |
+    | `<size=N>…</size>` | Absolute font size in logical units |
+  </Tab>
+  <Tab title="Motion effects">
+    | Tag | Effect |
+    |---|---|
+    | `<wave>…</wave>` | Sine-wave vertical displacement |
+    | `<shake>…</shake>` | High-frequency random displacement |
+    | `<jitter>…</jitter>` | Low-frequency random position noise |
+  </Tab>
+  <Tab title="Colour effects">
+    | Tag | Effect |
+    |---|---|
+    | `<rainbow>…</rainbow>` | Continuous hue cycling |
+    | `<pulse>…</pulse>` | Alpha/brightness pulsation |
+    | `<fade>…</fade>` | Fade-in reveal |
+  </Tab>
+  <Tab title="Reveal effects">
+    | Tag | Effect |
+    |---|---|
+    | `<typewriter>…</typewriter>` | Character-by-character reveal with optional fade-in |
+  </Tab>
+</Tabs>
+
+## Complete example
+
+<Steps>
+  <Step title="Configure layout settings">
+    Fill in at minimum a `RegularFont` and `PixelSize`. All other fields use sensible defaults.
+
+    ```csharp
+    var settings = new RichTextLayoutSettings
+    {
+        RegularFont   = regularFont,
+        BoldFont      = boldFont,
+        ItalicFont    = italicFont,
+        MonoFont      = monoFont,
+        PixelSize     = 18f,
+        LineHeight    = 1.4f,
+        MaxWidth      = 400f,
+        DefaultColor  = new FontColor(230, 230, 230, 255),
+
+        // Wave defaults
+        DefaultWaveAmp   = 3f,
+        DefaultWaveFreq  = 2f,
+        DefaultWavePhase = 0.4f,
+
+        // Typewriter defaults
+        DefaultTypewriterSpeed  = 20f,
+        DefaultTypewriterFadeIn = 0.15f,
+
+        // Rainbow defaults
+        DefaultRainbowSpeed  = 1f,
+        DefaultRainbowSpread = 0.3f,
+        DefaultRainbowSat    = 0.9f,
+        DefaultRainbowValue  = 1.0f,
+    };
+    ```
+  </Step>
+  <Step title="Create the rich text object">
+    Parse once, keep the result alive across frames.
+
+    ```csharp
+    QuillRichText richText = canvas.CreateRichText(
+        "<typewriter>Welcome to <rainbow>Prowl.Quill</rainbow>!\n" +
+        "This text uses <b>bold</b>, <i>italic</i>, and <mono>mono</mono> fonts.\n" +
+        "<wave>Wavy</wave> and <shake>shaky</shake> effects are <color=#FF8040>time-driven</color>.\n" +
+        "Inline <size=24>large</size> and <size=12>small</size> sizes work too.</typewriter>",
+        settings);
+    ```
+  </Step>
+  <Step title="Draw every frame">
+    Pass the accumulated game time so all animations advance correctly.
+
+    ```csharp
+    double currentTime = DateTime.UtcNow.TimeOfDay.TotalSeconds;
+
+    // Centre the block on screen
+    canvas.DrawRichText(
+        richText,
+        position:    new Float2(canvas.Width / 2f, canvas.Height / 2f),
+        currentTime: currentTime,
+        origin:      new Float2(0.5f, 0.5f));
+    ```
+  </Step>
+  <Step title="Handle link clicks (optional)">
+    Call `GetRichTextLinkAt` in your mouse-click handler.
+
+    ```csharp
+    Float2 mousePos = canvas.PixelToLogical(rawMousePixelPos);
+
+    if (canvas.GetRichTextLinkAt(
+            richText,
+            renderOffset: new Float2(canvas.Width / 2f, canvas.Height / 2f),
+            point:        mousePos,
+            useScissor:   true,
+            out string href))
+    {
+        System.Diagnostics.Process.Start(href);
+    }
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+`QuillRichText` is a value type (struct), but the `Layout` field it wraps is a reference. Store it as a field or local variable and **reuse it every frame** — calling `CreateRichText` on every draw will re-parse and re-layout the text, costing unnecessary CPU time and resetting all animations. Call `Reset()` when you want animations to replay from the beginning without recreating the object.
+</Tip>
+
+## Measuring without drawing
+
+```csharp
+Float2 size = canvas.MeasureRichText(source, settings);
+```
+
+Use `size` to centre a tooltip, size a background panel, or decide whether to scroll. Note that `MeasureRichText` creates and discards a full layout internally, so if you intend to draw the text too, call `CreateRichText` instead and read `QuillRichText.Size`.

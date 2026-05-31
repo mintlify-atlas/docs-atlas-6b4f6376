@@ -1,0 +1,287 @@
+---
+title: "SVG API — SVGParser & SVGRenderer in Prowl.Quill"
+sidebarTitle: "SVG API"
+description: "Reference for SVGParser and SVGRenderer: parsing SVG files into SvgElement trees and rendering them to a Canvas, including all supported element types."
+---
+
+Prowl.Quill includes a self-contained SVG pipeline composed of two static classes — `SVGParser` and `SVGRenderer` — and a hierarchy of typed element classes rooted at `SvgElement`. `SVGParser` converts an SVG XML file on disk into an in-memory tree of `SvgElement` objects, each already pre-parsed for colours, stroke widths, and path commands. `SVGRenderer` walks that tree and issues the equivalent `Canvas` draw calls, applying strokes and fills with anti-aliasing. The pipeline supports the most common SVG primitives and is designed for embedding icons, illustrations, and other vector assets in Quill-rendered UIs.
+
+---
+
+## SVGParser
+
+`SVGParser` is a `static` class. It parses SVG XML files and returns the root
+`SvgElement` of the document tree. Internally it uses `System.Xml.XmlDocument`
+and maps each recognised XML element to a typed subclass.
+
+### Methods
+
+#### ParseSVGDocument
+
+```csharp
+public static SvgElement ParseSVGDocument(string filePath)
+```
+
+Reads an SVG file from disk, validates that the root element is `<svg>`, and
+recursively parses all child elements into a typed `SvgElement` tree.
+
+<ParamField path="filePath" type="string">
+  Absolute or relative path to the `.svg` file.
+</ParamField>
+
+**Returns:** The root `SvgElement` (always of `TagType.svg`). Use
+`SvgElement.Flatten()` to enumerate all descendants, or pass the root directly
+to `SVGRenderer.DrawToCanvas`.
+
+**Exceptions:**
+- `FileNotFoundException` — file does not exist at the given path.
+- `InvalidOperationException` — document root is not an `<svg>` element.
+
+```csharp
+SvgElement icon = SVGParser.ParseSVGDocument("assets/icons/star.svg");
+```
+
+### Supported Element Types
+
+The parser maps XML tag names to typed subclasses. Unsupported tags are silently
+skipped during tree construction.
+
+| SVG tag     | C# class                | Parsed fields |
+|-------------|-------------------------|---------------|
+| `<svg>`     | `SvgElement`            | Container root |
+| `<path>`    | `SvgPathElement`        | `d` attribute → `DrawCommand[]` |
+| `<circle>`  | `SvgCircleElement`      | `cx`, `cy`, `r` |
+| `<rect>`    | `SvgRectElement`        | `x`, `y`, `width`, `height`, `rx`, `ry` |
+| `<line>`    | `SvgLineElement`        | `x1`, `y1`, `x2`, `y2` |
+| `<ellipse>` | `SvgEllipseElement`     | `cx`, `cy`, `rx`, `ry` |
+| `<polyline>`| `SvgPolylineElement`    | `points` |
+| `<polygon>` | `SvgPolygonElement`     | `points` |
+| `<g>`       | `SvgElement`            | Group container (children parsed recursively) |
+
+---
+
+## SVGRenderer
+
+`SVGRenderer` is a `static` class that translates a parsed `SvgElement` tree
+into canvas draw calls. It calls `SvgElement.Flatten()` internally and
+dispatches each element to the appropriate drawing function.
+
+### Static Fields
+
+<ResponseField name="currentColor" type="Color32">
+  The colour substituted when an SVG element declares `stroke="currentColor"` or
+  `fill="currentColor"`. Defaults to `Color.White`. Set this before calling
+  `DrawToCanvas` to match the ambient UI colour:
+
+  ```csharp
+  SVGRenderer.currentColor = Color32.FromArgb(255, 30, 144, 255);
+  SVGRenderer.DrawToCanvas(canvas, new Float2(10, 10), icon);
+  ```
+</ResponseField>
+
+<ResponseField name="debug" type="bool">
+  When `true`, the renderer prints each processed draw command to
+  `Console.WriteLine`. Automatically reset to `false` at the end of each
+  `DrawToCanvas` call. Useful for diagnosing incorrect path rendering:
+
+  ```csharp
+  SVGRenderer.debug = true;
+  SVGRenderer.DrawToCanvas(canvas, Float2.Zero, element);
+  // debug is false again after the call returns
+  ```
+</ResponseField>
+
+### Methods
+
+#### DrawToCanvas
+
+```csharp
+public static void DrawToCanvas(Canvas canvas, Float2 position, SvgElement svgElement)
+```
+
+Renders a parsed SVG element (and all its descendants) to the canvas, offset by
+`position`. The method:
+
+1. Calls `svgElement.Flatten()` to produce a depth-first ordered list of all
+   descendants.
+2. For each element, configures the canvas stroke colour, fill colour, and
+   stroke width from the element's parsed style properties.
+3. Dispatches to the element-type-specific draw function.
+4. Resets `debug` to `false` before returning.
+
+<ParamField path="canvas" type="Canvas">
+  The target canvas. The canvas's current transform, scissor, and global alpha
+  are respected. The SVG elements are drawn on top of any geometry already
+  accumulated in the frame.
+</ParamField>
+
+<ParamField path="position" type="Float2">
+  A pixel-space offset added to all coordinates in the SVG. Use this to
+  position the SVG within the canvas without modifying the SVG's internal
+  coordinate system.
+</ParamField>
+
+<ParamField path="svgElement" type="SvgElement">
+  The root element returned by `SVGParser.ParseSVGDocument`. You can also pass
+  any subtree node to render only a portion of the document.
+</ParamField>
+
+---
+
+## SvgElement
+
+`SvgElement` is the base class for all parsed SVG nodes. It stores common
+presentation attributes (stroke, fill, stroke-width) and the hierarchical
+structure (parent–child relationships). Specialised subclasses add
+geometry-specific fields.
+
+### Fields
+
+<ResponseField name="tag" type="SvgElement.TagType">
+  The element type, corresponding to the XML tag name. Possible values: `svg`,
+  `path`, `circle`, `rect`, `line`, `polyline`, `polygon`, `ellipse`, `g`.
+</ResponseField>
+
+<ResponseField name="depth" type="int">
+  Zero-based nesting depth in the original document. The root `<svg>` element
+  has depth `0`; direct children have depth `1`, etc.
+</ResponseField>
+
+<ResponseField name="Attributes" type="Dictionary<string, string>">
+  All XML attributes defined on this element, keyed case-insensitively. Access
+  raw attribute values for properties not explicitly surfaced on subclasses.
+</ResponseField>
+
+<ResponseField name="Children" type="List<SvgElement>">
+  Direct child elements. Recursively populated during parsing. Use
+  `Flatten()` to iterate the entire subtree in depth-first order.
+</ResponseField>
+
+<ResponseField name="drawCommands" type="DrawCommand[]">
+  Path draw commands for `SvgPathElement` instances. `null` on non-path
+  elements. Each `DrawCommand` stores the command type (`DrawType`), whether
+  coordinates are relative, and a `float[]` of parameters.
+</ResponseField>
+
+<ResponseField name="stroke" type="Color32">
+  The parsed stroke colour. Only valid when `strokeType == ColorType.specific`.
+</ResponseField>
+
+<ResponseField name="fill" type="Color32">
+  The parsed fill colour. Only valid when `fillType == ColorType.specific`.
+</ResponseField>
+
+<ResponseField name="strokeType" type="SvgElement.ColorType">
+  Determines how the stroke colour is sourced: `none` (no stroke), `currentColor`
+  (use `SVGRenderer.currentColor`), or `specific` (use `stroke`).
+</ResponseField>
+
+<ResponseField name="fillType" type="SvgElement.ColorType">
+  Determines how the fill colour is sourced: `none` (no fill), `currentColor`
+  (use `SVGRenderer.currentColor`), or `specific` (use `fill`).
+</ResponseField>
+
+<ResponseField name="strokeWidth" type="float">
+  The stroke width in SVG user units. Defaults to `1.0` if the `stroke-width`
+  attribute is absent.
+</ResponseField>
+
+### Methods
+
+#### Flatten
+
+```csharp
+public List<SvgElement> Flatten()
+```
+
+Returns a flat, depth-first list containing this element and all of its
+descendants. Useful for custom rendering logic or debugging.
+
+```csharp
+var all = icon.Flatten();
+Console.WriteLine($"Total elements: {all.Count}");
+foreach (var el in all)
+    Console.WriteLine($"  {"  ".PadLeft(el.depth * 2)}{el}");
+```
+
+#### ToString
+
+```csharp
+public override string ToString()
+```
+
+Returns a short summary string in the format:
+```
+<tagName Depth=N Attributes='A' Children='C'>
+```
+
+(`SvgPathElement` overrides this to also list each `DrawCommand`.)
+
+---
+
+## ColorType Enum
+
+`SvgElement.ColorType` describes how a colour value is sourced for stroke or
+fill.
+
+| Value | Meaning |
+|-------|---------|
+| `none` | No colour — the property is disabled (no stroke or no fill). |
+| `currentColor` | Inherit the colour from `SVGRenderer.currentColor`. |
+| `specific` | A concrete colour is defined in the SVG attribute. |
+
+---
+
+## DrawCommand and DrawType
+
+`DrawCommand` is a struct holding one parsed SVG path command. `DrawType` is the
+corresponding enum.
+
+| DrawType | SVG letter | Parameters |
+|----------|-----------|------------|
+| `MoveTo` | M / m | x, y |
+| `LineTo` | L / l | x, y |
+| `HorizontalLineTo` | H / h | x |
+| `VerticalLineTo` | V / v | y |
+| `CubicCurveTo` | C / c | x1 y1 x2 y2 x y |
+| `SmoothCubicCurveTo` | S / s | x2 y2 x y |
+| `QuadraticCurveTo` | Q / q | x1 y1 x y |
+| `SmoothQuadraticCurveTo` | T / t | x y |
+| `ArcTo` | A / a | rx ry x-rot large-arc sweep x y |
+| `ClosePath` | Z / z | _(none)_ |
+
+Lowercase SVG letters set `DrawCommand.relative = true`; uppercase set `false`.
+
+---
+
+## Full Usage Example
+
+```csharp
+// 1. Parse an SVG file once (e.g. at startup)
+SvgElement icon = SVGParser.ParseSVGDocument("assets/ui/close-icon.svg");
+
+// 2. Each frame, render it at a specific canvas position
+canvas.BeginFrame(windowWidth, windowHeight, dpiScale);
+
+SVGRenderer.currentColor = Color32.FromArgb(255, 220, 220, 220); // icon tint
+SVGRenderer.DrawToCanvas(canvas, new Float2(buttonX, buttonY), icon);
+
+canvas.Render();
+```
+
+### Inspecting the element tree
+
+```csharp
+var elements = icon.Flatten();
+foreach (var el in elements)
+{
+    Console.Write($"{new string(' ', el.depth * 2)}{el.tag}");
+    Console.Write($"  fill={el.fillType}");
+    if (el.fillType == SvgElement.ColorType.specific)
+        Console.Write($"({el.fill})");
+    Console.Write($"  stroke={el.strokeType}");
+    if (el.strokeType == SvgElement.ColorType.specific)
+        Console.Write($"({el.stroke}) w={el.strokeWidth}");
+    Console.WriteLine();
+}
+```
